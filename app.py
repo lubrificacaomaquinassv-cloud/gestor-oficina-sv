@@ -62,10 +62,12 @@ def sb(table):
     return pd.DataFrame(r.data)
 
 def parse_dt_br(series):
-    """Converte timestamp para horário de Brasília e extrai date."""
-    dt = pd.to_datetime(series, errors="coerce", utc=True)
-    dt_br = dt.dt.tz_convert("America/Sao_Paulo")
-    return dt_br
+    """Parse timestamp — já vem em -0300 (Brasília), só faz o parse."""
+    dt = pd.to_datetime(series, errors="coerce", utc=False)
+    # Se vier com timezone, remove para evitar conflito de comparação
+    if hasattr(dt, 'dt') and dt.dt.tz is not None:
+        dt = dt.dt.tz_localize(None)
+    return dt
 
 def is_trator(v):
     return bool(re.match(r'^\d{4}$', str(v).strip()))
@@ -74,7 +76,9 @@ def is_trator(v):
 def load_os(_c):
     df = sb("ordem_servico")
     if df.empty: return df
-    df["dt_br"] = parse_dt_br(df["created_at"])
+    df["dt_br"] = pd.to_datetime(df["created_at"], errors="coerce", utc=False)
+    if df["dt_br"].dt.tz is not None:
+        df["dt_br"] = df["dt_br"].dt.tz_localize(None)
     df["data_os"] = df["dt_br"].dt.date
     df["dt_fmt"] = df["dt_br"].dt.strftime("%d/%m/%Y %H:%M")
     df["tempo_min"] = pd.to_numeric(df["tempo_min"], errors="coerce").fillna(0)
@@ -103,7 +107,9 @@ def load_lub(_c):
 def load_abast(_c):
     df = sb("vw_abastecimento_consolidado")
     if df.empty: return df
-    df["dt_br"] = parse_dt_br(df["created_at"])
+    df["dt_br"] = pd.to_datetime(df["created_at"], errors="coerce", utc=False)
+    if df["dt_br"].dt.tz is not None:
+        df["dt_br"] = df["dt_br"].dt.tz_localize(None)
     df["data_os"] = df["dt_br"].dt.date
     df["dt_fmt"] = df["dt_br"].dt.strftime("%H:%M")
     df["liters"] = pd.to_numeric(df["liters"], errors="coerce").fillna(0)
@@ -184,9 +190,11 @@ with tab1:
         os_aber  = df_os[df_os["status"].str.upper().str.contains("ABERTO|ANDAMENTO|PENDENTE", na=False)]
 
         c1,c2,c3,c4 = st.columns(4)
-        c1.metric("🔧 OS Hoje",        len(os_hoje))
-        c2.metric("📋 OS no Mês",       len(os_mes))
-        c3.metric("🔴 Em Aberto",       len(os_aber))
+        # Se não há OS no mês atual, mostra total geral com label diferente
+        label_mes = f"OS em {mes_ini.strftime('%b/%Y')}" if len(os_mes)>0 else "OS (sem registros no mês)"
+        c1.metric("🔧 OS Hoje",   len(os_hoje))
+        c2.metric(f"📋 {label_mes}", len(os_mes))
+        c3.metric("🔴 Em Aberto", len(os_aber))
         c4.metric("✅ Finalizadas Mês", len(os_mes[os_mes["status"].str.upper().str.contains("FINAL", na=False)]))
 
         st.markdown('<div class="sec">OS registradas hoje (ou últimas 5)</div>', unsafe_allow_html=True)
@@ -258,41 +266,57 @@ with tab2:
             l1,l2,l3 = st.columns(3)
             l1.metric("✅ OK",ok); l2.metric("⚠️ Próximo",prx); l3.metric("🔴 Atrasado",atr)
 
-            st.markdown('<div class="sec">Velocímetros — 6 mais críticos</div>', unsafe_allow_html=True)
-            dg = df_lub.sort_values("horas_restantes",ascending=True).head(6)
-            for i in range(0,len(dg),2):
-                cols = st.columns(2)
-                for j,col in enumerate(cols):
-                    idx=i+j
-                    if idx>=len(dg): break
-                    row=dg.iloc[idx]
-                    h_na  =float(row["h_na_troca"])      if pd.notna(row["h_na_troca"])      else 0
-                    h_prox=float(row["h_proxima_troca"]) if pd.notna(row["h_proxima_troca"]) else h_na+250
-                    h_at  =float(row["h_atual"])         if pd.notna(row["h_atual"])          else h_na
-                    h_rest=float(row["horas_restantes"]) if pd.notna(row["horas_restantes"])  else 0
-                    st_   =str(row["status_troca"])
-                    cor="#c0392b" if st_=="EM ATRASO" else "#d4a017" if st_=="PROXIMO" else "#4a9e3f"
-                    emin=max(0,h_na-50); emax=h_prox+max(100,abs(min(0,h_rest))+50)
-                    fg=go.Figure(go.Indicator(
-                        mode="gauge+number+delta",value=h_at,
-                        number={"suffix":"h","font":{"color":"#e8edd0","size":18}},
+            st.markdown('<div class="sec">Velocímetros — equipamentos críticos (lado a lado)</div>', unsafe_allow_html=True)
+            dg = df_lub.sort_values("horas_restantes",ascending=True).head(9)
+            # Grade 3 colunas para melhor visualização lado a lado
+            n = len(dg)
+            for i in range(0, n, 3):
+                cols3 = st.columns(3)
+                for j, col in enumerate(cols3):
+                    idx = i + j
+                    if idx >= n: break
+                    row = dg.iloc[idx]
+                    h_na  = float(row["h_na_troca"])      if pd.notna(row["h_na_troca"])      else 0
+                    h_prox= float(row["h_proxima_troca"]) if pd.notna(row["h_proxima_troca"]) else h_na+250
+                    h_at  = float(row["h_atual"])         if pd.notna(row["h_atual"])          else h_na
+                    h_rest= float(row["horas_restantes"]) if pd.notna(row["horas_restantes"])  else 0
+                    st_   = str(row["status_troca"])
+                    cor   = "#c0392b" if st_=="EM ATRASO" else "#d4a017" if st_=="PROXIMO" else "#4a9e3f"
+                    emin  = max(0, h_na-50)
+                    emax  = h_prox + max(100, abs(min(0,h_rest))+50)
+                    fg = go.Figure(go.Indicator(
+                        mode="gauge+number+delta", value=h_at,
+                        number={"suffix":"h","font":{"color":"#e8edd0","size":16}},
                         delta={"reference":h_prox,"valueformat":".0f",
-                               "increasing":{"color":"#c0392b"},"decreasing":{"color":"#4a9e3f"},"suffix":"h"},
-                        title={"text":f"<b>{row['vehicle']}</b><br>"
-                                      f"<span style='font-size:10px;color:#8aab80'>"
-                                      f"Troca:{fmt(h_na)}→{fmt(h_prox)}h · "
+                               "increasing":{"color":"#c0392b"},
+                               "decreasing":{"color":"#4a9e3f"},"suffix":"h"},
+                        title={"text":f"<b style='color:#e8edd0'>{row['vehicle']}</b><br>"
+                                      f"<span style='font-size:9px;color:#8aab80'>"
+                                      f"Troca:{fmt(h_na)}→{fmt(h_prox)}h<br>"
                                       f"{'⚠ Atrasado' if h_rest<0 else '✓ Restam'}:{fmt(abs(h_rest))}h</span>",
-                               "font":{"color":"#e8edd0","size":12}},
-                        gauge={"axis":{"range":[emin,emax],"tickcolor":"#4a6644","tickfont":{"color":"#4a6644","size":9}},
-                               "bar":{"color":cor,"thickness":0.25},"bgcolor":"#0d180c","bordercolor":"#1e2e1c",
-                               "steps":[{"range":[emin,h_prox-100],"color":"#1a3318"},
-                                        {"range":[h_prox-100,h_prox],"color":"#2a2200"},
-                                        {"range":[h_prox,emax],"color":"#2a1010"}],
-                               "threshold":{"line":{"color":"#c0392b","width":3},"thickness":0.8,"value":h_prox}}))
-                    fg.update_layout(paper_bgcolor="#111c10",plot_bgcolor="#111c10",
-                                     height=200,margin=dict(l=10,r=10,t=55,b=5))
+                               "font":{"color":"#e8edd0","size":11}},
+                        gauge={
+                            "axis":{"range":[emin,emax],
+                                    "tickcolor":"#4a6644",
+                                    "tickfont":{"color":"#4a6644","size":8}},
+                            "bar":{"color":cor,"thickness":0.3},
+                            "bgcolor":"#0d180c","bordercolor":"#1e2e1c",
+                            "steps":[
+                                {"range":[emin,h_prox-100],"color":"#1a3318"},
+                                {"range":[h_prox-100,h_prox],"color":"#2a2200"},
+                                {"range":[h_prox,emax],"color":"#2a1010"},
+                            ],
+                            "threshold":{"line":{"color":"#c0392b","width":3},
+                                         "thickness":0.8,"value":h_prox},
+                        }
+                    ))
+                    fg.update_layout(
+                        paper_bgcolor="#111c10", plot_bgcolor="#111c10",
+                        height=190, margin=dict(l=8,r=8,t=60,b=5)
+                    )
                     with col:
-                        st.plotly_chart(fg,use_container_width=True,key=f"g_{row['vehicle']}_{idx}")
+                        st.plotly_chart(fg, use_container_width=True,
+                                        key=f"g_{row['vehicle']}_{idx}")
 
             st.markdown('<div class="sec">Lista completa — por urgência</div>', unsafe_allow_html=True)
             def badge(s): return {"OK":"🟢 OK","PROXIMO":"🟡 PRÓXIMO","EM ATRASO":"🔴 EM ATRASO"}.get(s,f"⚪ {s}")
