@@ -60,8 +60,6 @@ PLOTLY_DARK = dict(
     paper_bgcolor='#111c10',
     plot_bgcolor='#0d180c',
     font=dict(color='#8aab80', family='Barlow Condensed'),
-    xaxis=dict(gridcolor='#1e2e1c', zerolinecolor='#1e2e1c'),
-    yaxis=dict(gridcolor='#1e2e1c', zerolinecolor='#1e2e1c'),
     margin=dict(l=10, r=10, t=30, b=10),
 )
 
@@ -209,8 +207,12 @@ with tab1:
             barmode="relative",
             legend=dict(orientation="h", y=1.05, x=0, font=dict(color="#e8edd0")),
             xaxis_title="Horas restantes para troca",
-            yaxis=dict(gridcolor="#1e2e1c", tickfont=dict(color="#e8edd0", size=11)),
-            xaxis=dict(gridcolor="#1e2e1c", zeroline=True, zerolinecolor="#c0392b", zerolinewidth=2),
+            xaxis_gridcolor="#1e2e1c",
+            xaxis_zeroline=True,
+            xaxis_zerolinecolor="#c0392b",
+            xaxis_zerolinewidth=2,
+            yaxis_gridcolor="#1e2e1c",
+            yaxis_tickfont=dict(color="#e8edd0", size=11),
         )
         fig_bar.add_vline(x=0,   line_color="#c0392b", line_width=2, line_dash="dash")
         fig_bar.add_vline(x=100, line_color="#d4a017", line_width=1, line_dash="dot",
@@ -273,7 +275,7 @@ with tab1:
                         },
                     ))
                     fig_g.update_layout(
-                        paper_bgcolor="#111c10",
+                        
                         plot_bgcolor="#111c10",
                         height=220,
                         margin=dict(l=10, r=10, t=60, b=10),
