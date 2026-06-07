@@ -46,6 +46,21 @@ PDARK = dict(paper_bgcolor='#111c10', plot_bgcolor='#0d180c',
 
 TABLE_CFG = dict(use_container_width=True, hide_index=True)
 
+def dark_table(df, height=None):
+    """Renderiza DataFrame como tabela HTML escura, sem depender do CSS do Streamlit."""
+    rows = ""
+    for _, row in df.iterrows():
+        cells = "".join(f"<td style='padding:8px 12px;border-bottom:1px solid #1e2e1c;color:#e8edd0;font-size:12px;background:#111c10'>{v}</td>" for v in row)
+        rows += f"<tr>{cells}</tr>"
+    headers = "".join(f"<th style='padding:8px 12px;background:#172015;color:#6fcf60;font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;border-bottom:2px solid #2d5a2a;white-space:nowrap'>{c}</th>" for c in df.columns)
+    h_style = f"max-height:{height}px;overflow-y:auto;" if height else ""
+    html = f"""<div style='background:#111c10;border:1px solid #1e2e1c;border-radius:8px;overflow:hidden;{h_style}'>
+    <table style='width:100%;border-collapse:collapse;background:#111c10'>
+      <thead><tr>{headers}</tr></thead>
+      <tbody>{rows}</tbody>
+    </table></div>"""
+    st.markdown(html, unsafe_allow_html=True)
+
 from st_supabase_connection import SupabaseConnection
 conn = st.connection("supabase", type=SupabaseConnection, ttl=300)
 
@@ -188,8 +203,8 @@ with tab1:
         df_os_tbl = df_os_base.sort_values("created_at", ascending=False).head(5)[cols_os].copy()
         if "created_at" in df_os_tbl.columns:
             df_os_tbl["created_at_br"] = df_os_tbl["created_at_br"].dt.strftime("%d/%m %H:%M")
-        df_os_tbl.columns = [c.replace("_"," ").title() for c in cols_os]
-        st.dataframe(df_os_tbl, **TABLE_CFG, height=min(260,55+len(df_os_tbl)*38), key="tbl_os_hoje")
+        df_os_tbl.columns = [c.replace("_br","").replace("_"," ").title() for c in cols_os]
+        dark_table(df_os_tbl, height=260)
 
         # OS em aberto
         if not os_aberto.empty:
@@ -198,8 +213,8 @@ with tab1:
             df_ab = os_aberto.sort_values("created_at", ascending=False).head(10)[cols_ab].copy()
             if "created_at" in df_ab.columns:
                 df_ab["created_at_br"] = df_ab["created_at_br"].dt.strftime("%d/%m %H:%M")
-            df_ab.columns = [c.replace("_"," ").title() for c in cols_ab]
-            st.dataframe(df_ab, **TABLE_CFG, height=min(300,55+len(df_ab)*38), key="tbl_os_aberto")
+            df_ab.columns = [c.replace("_br","").replace("_"," ").title() for c in cols_ab]
+            dark_table(df_ab, height=300)
 
         # Rankings
         col_r1, col_r2 = st.columns(2)
@@ -324,7 +339,7 @@ with tab2:
                 lambda v: f"{v:+.0f}h" if pd.notna(v) else "—")
             df_lub_tbl["status_troca"] = df_lub_tbl["status_troca"].apply(badge_st)
             df_lub_tbl.columns = ["Frota","H. Troca","Próxima (h)","H. Atual","Restante","Status"]
-            st.dataframe(df_lub_tbl, **TABLE_CFG, height=300, key="tbl_lub_full")
+            dark_table(df_lub_tbl, height=300)
 
     with col_b:
         st.markdown('<div class="sec">Borracharia — OS recentes</div>', unsafe_allow_html=True)
@@ -339,8 +354,8 @@ with tab2:
             df_bor_show = df_bor.sort_values("criado_em",ascending=False).head(5)[cols_bor].copy()
             if "criado_em" in df_bor_show.columns:
                 df_bor_show["criado_em"] = pd.to_datetime(df_bor_show["criado_em"]).dt.strftime("%d/%m %H:%M")
-            df_bor_show.columns = [c.replace("_"," ").title() for c in cols_bor]
-            st.dataframe(df_bor_show, **TABLE_CFG, height=min(280,55+len(df_bor_show)*38), key="tbl_bor")
+            df_bor_show.columns = [c.replace("_br","").replace("_"," ").title() for c in cols_bor]
+            dark_table(df_bor_show, height=280)
 
             if "tipo_manutencao" in df_bor.columns:
                 st.markdown('<div class="sec">Tipos mais frequentes</div>', unsafe_allow_html=True)
@@ -413,8 +428,8 @@ with tab3:
             df_ab_show = abast_hoje.sort_values("created_at",ascending=False).head(10)[cols_ab].copy()
             if "created_at" in df_ab_show.columns:
                 df_ab_show["created_at_br"] = df_ab_show["created_at_br"].dt.strftime("%H:%M")
-            df_ab_show.columns = [c.replace("_"," ").title() for c in cols_ab]
-            st.dataframe(df_ab_show, **TABLE_CFG, height=min(380,55+len(df_ab_show)*38), key="tbl_abast_hoje")
+            df_ab_show.columns = [c.replace("_br","").replace("_"," ").title() for c in cols_ab]
+            dark_table(df_ab_show, height=380)
 
     with col_c2:
         st.markdown('<div class="sec">Últimas 3 transferências posto → comboio</div>', unsafe_allow_html=True)
@@ -428,7 +443,7 @@ with tab3:
             if "quantidade_l" in df_tr.columns:
                 df_tr["quantidade_l"] = df_tr["quantidade_l"].apply(lambda v: f"{fmt(v)} L")
             df_tr.columns = [c.replace("_"," ").title() for c in cols_tr]
-            st.dataframe(df_tr, **TABLE_CFG, height=180, key="tbl_transf")
+            dark_table(df_tr, height=180)
 
         st.markdown('<div class="sec">Volume por frota no mês (L)</div>', unsafe_allow_html=True)
         if not df_abast.empty:
@@ -583,7 +598,7 @@ with tab4:
         df_disp_tbl["horas_trabalhadas"]   = df_disp_tbl["horas_trabalhadas"].apply(lambda v: f"{v:.0f}h")
         df_disp_tbl["horas_parada"]        = df_disp_tbl["horas_parada"].apply(lambda v: f"{v:.0f}h")
         df_disp_tbl.columns = ["Frota","Dias Ativos","H. Trabalhadas","H. Paradas","Disponib. %","OS no Mês"]
-        st.dataframe(df_disp_tbl, **TABLE_CFG, height=380, key="tbl_disp")
+        dark_table(df_disp_tbl, height=380)
 
 st.divider()
 st.markdown("<div style='text-align:center;font-size:11px;color:#4a6644;'>"
