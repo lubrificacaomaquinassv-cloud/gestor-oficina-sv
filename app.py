@@ -23,11 +23,19 @@ h1,h2,h3{color:#e8edd0;font-family:'Barlow Condensed',sans-serif;letter-spacing:
 div[data-testid="metric-container"]{background:#111c10;border:1px solid #1e2e1c;border-radius:10px;padding:14px;}
 div[data-testid="metric-container"] label{color:#8aab80!important;font-size:11px!important;}
 div[data-testid="metric-container"] [data-testid="stMetricValue"]{color:#e8edd0!important;}
-/* Tabela escura */
+/* Tabela escura — forçado */
+[data-testid="stDataFrame"]{background:#111c10!important;}
 [data-testid="stDataFrame"] > div{background:#111c10!important;border:1px solid #1e2e1c!important;border-radius:8px!important;}
-[data-testid="stDataFrame"] th{background:#172015!important;color:#6fcf60!important;font-size:11px!important;letter-spacing:1px!important;}
-[data-testid="stDataFrame"] td{background:#111c10!important;color:#e8edd0!important;font-size:12px!important;}
-[data-testid="stDataFrame"] tr:hover td{background:#1a2e18!important;}
+.stDataFrame{background:#111c10!important;}
+.stDataFrame table{background:#111c10!important;color:#e8edd0!important;}
+.stDataFrame thead tr th{background:#172015!important;color:#6fcf60!important;font-weight:700!important;border-bottom:1px solid #2d5a2a!important;}
+.stDataFrame tbody tr td{background:#111c10!important;color:#e8edd0!important;border-bottom:1px solid #1e2e1c!important;}
+.stDataFrame tbody tr:hover td{background:#1a2e18!important;}
+/* Glide table (versão nova Streamlit) */
+[data-testid="StyledFullScreenFrame"]{background:#111c10!important;}
+.dvn-scroller{background:#111c10!important;}
+.cell-wrapper{color:#e8edd0!important;}
+.header-cell{background:#172015!important;color:#6fcf60!important;}
 iframe{background:#111c10!important;}
 </style>
 """, unsafe_allow_html=True)
@@ -56,8 +64,10 @@ def is_trator(frota_id):
 def load_os(_c):
     df = sb("ordem_servico")
     if df.empty: return df
-    df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True).dt.tz_convert("America/Campo_Grande")
-    df["data_os"] = df["created_at"].dt.date
+    df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
+    # Usar horário de Brasília para exibição mas data em UTC-3 para filtro
+    df["created_at_br"] = df["created_at"].dt.tz_convert("America/Campo_Grande")
+    df["data_os"] = df["created_at_br"].dt.date
     df["tempo_min"] = pd.to_numeric(df["tempo_min"], errors="coerce").fillna(0)
     return df
 
@@ -83,8 +93,10 @@ def load_lub(_c):
 def load_abast(_c):
     df = sb("vw_abastecimento_consolidado")
     if df.empty: return df
-    df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True).dt.tz_convert("America/Campo_Grande")
-    df["data_os"] = df["created_at"].dt.date
+    df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
+    # Usar horário de Brasília para exibição mas data em UTC-3 para filtro
+    df["created_at_br"] = df["created_at"].dt.tz_convert("America/Campo_Grande")
+    df["data_os"] = df["created_at_br"].dt.date
     df["liters"] = pd.to_numeric(df["liters"], errors="coerce").fillna(0)
     return df
 
@@ -172,20 +184,20 @@ with tab1:
         if not tem_hoje:
             st.caption("⚠️ Sem OS hoje — exibindo as 5 últimas registradas.")
 
-        cols_os = [c for c in ["numero_os","id_frota","sistema","tipo_manutencao","status","mecanico","created_at"] if c in df_os_base.columns]
+        cols_os = [c for c in ["numero_os","id_frota","sistema","tipo_manutencao","status","mecanico","created_at_br"] if c in df_os_base.columns]
         df_os_tbl = df_os_base.sort_values("created_at", ascending=False).head(5)[cols_os].copy()
         if "created_at" in df_os_tbl.columns:
-            df_os_tbl["created_at"] = df_os_tbl["created_at"].dt.strftime("%d/%m %H:%M")
+            df_os_tbl["created_at_br"] = df_os_tbl["created_at_br"].dt.strftime("%d/%m %H:%M")
         df_os_tbl.columns = [c.replace("_"," ").title() for c in cols_os]
         st.dataframe(df_os_tbl, **TABLE_CFG, height=min(260,55+len(df_os_tbl)*38), key="tbl_os_hoje")
 
         # OS em aberto
         if not os_aberto.empty:
             st.markdown('<div class="sec">OS em aberto / pendente</div>', unsafe_allow_html=True)
-            cols_ab = [c for c in ["numero_os","id_frota","sistema","tipo_manutencao","status","mecanico","created_at"] if c in os_aberto.columns]
+            cols_ab = [c for c in ["numero_os","id_frota","sistema","tipo_manutencao","status","mecanico","created_at_br"] if c in os_aberto.columns]
             df_ab = os_aberto.sort_values("created_at", ascending=False).head(10)[cols_ab].copy()
             if "created_at" in df_ab.columns:
-                df_ab["created_at"] = df_ab["created_at"].dt.strftime("%d/%m %H:%M")
+                df_ab["created_at_br"] = df_ab["created_at_br"].dt.strftime("%d/%m %H:%M")
             df_ab.columns = [c.replace("_"," ").title() for c in cols_ab]
             st.dataframe(df_ab, **TABLE_CFG, height=min(300,55+len(df_ab)*38), key="tbl_os_aberto")
 
@@ -397,10 +409,10 @@ with tab3:
         if abast_hoje.empty:
             st.info("Nenhum abastecimento hoje.")
         else:
-            cols_ab = [c for c in ["created_at","vehicle","operator","fuel_type","liters","hourmeter"] if c in abast_hoje.columns]
+            cols_ab = [c for c in ["created_at_br","vehicle","operator","fuel_type","liters","hourmeter"] if c in abast_hoje.columns]
             df_ab_show = abast_hoje.sort_values("created_at",ascending=False).head(10)[cols_ab].copy()
             if "created_at" in df_ab_show.columns:
-                df_ab_show["created_at"] = df_ab_show["created_at"].dt.strftime("%H:%M")
+                df_ab_show["created_at_br"] = df_ab_show["created_at_br"].dt.strftime("%H:%M")
             df_ab_show.columns = [c.replace("_"," ").title() for c in cols_ab]
             st.dataframe(df_ab_show, **TABLE_CFG, height=min(380,55+len(df_ab_show)*38), key="tbl_abast_hoje")
 
