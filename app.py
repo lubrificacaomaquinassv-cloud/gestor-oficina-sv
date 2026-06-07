@@ -73,10 +73,20 @@ conn = st.connection("supabase", type=SupabaseConnection, ttl=300)
 # ─────────────────────────────────────────────
 # CARGA DE DADOS
 # ─────────────────────────────────────────────
+def sb_query(conn, table):
+    """Consulta Supabase compatível com todas as versões do st-supabase-connection."""
+    try:
+        # Versão nova: table() direto
+        resp = conn.client.table(table).select("*").execute()
+        return pd.DataFrame(resp.data)
+    except Exception:
+        # Versão antiga: .query().execute()
+        resp = conn.query("*", table=table).execute()
+        return pd.DataFrame(resp.data)
+
 @st.cache_data(ttl=180, show_spinner="Atualizando horímetros...")
 def carregar_lubrificacao(_conn):
-    resp = _conn.query("*", table="vw_proxima_troca_v4").execute()
-    df = pd.DataFrame(resp.data)
+    df = sb_query(_conn, "vw_proxima_troca_v4")
     if df.empty:
         return df
     df["horas_restantes"]  = pd.to_numeric(df["horas_restantes"],  errors="coerce")
@@ -89,8 +99,7 @@ def carregar_lubrificacao(_conn):
 
 @st.cache_data(ttl=180, show_spinner="Carregando abastecimentos...")
 def carregar_abastecimento(_conn):
-    resp = _conn.query("*", table="vw_abastecimento_consolidado").execute()
-    df = pd.DataFrame(resp.data)
+    df = sb_query(_conn, "vw_abastecimento_consolidado")
     if df.empty:
         return df
     df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
@@ -100,8 +109,7 @@ def carregar_abastecimento(_conn):
 
 @st.cache_data(ttl=180, show_spinner="Carregando apontamentos...")
 def carregar_apontamentos(_conn):
-    resp = _conn.query("*", table="apontamento_campo").execute()
-    df = pd.DataFrame(resp.data)
+    df = sb_query(_conn, "apontamento_campo")
     if df.empty:
         return df
     df["data"]             = pd.to_datetime(df["data"],    errors="coerce")
