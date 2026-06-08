@@ -23,13 +23,15 @@ h1,h2,h3{color:#e8edd0;}
 div[data-testid="metric-container"]{background:#111c10;border:1px solid #1e2e1c;border-radius:10px;padding:14px;}
 div[data-testid="metric-container"] label{color:#8aab80!important;font-size:11px!important;}
 div[data-testid="metric-container"] [data-testid="stMetricValue"]{color:#e8edd0!important;}
+div[data-testid="stSelectbox"] label{color:#8aab80!important;}
+div[data-testid="stSelectbox"] > div{background:#111c10!important;border:1px solid #1e2e1c!important;color:#e8edd0!important;}
 </style>
 """, unsafe_allow_html=True)
 
 PDARK = dict(
     paper_bgcolor='#111c10', plot_bgcolor='#0d180c',
     font=dict(color='#e8edd0', family='Barlow Condensed'),
-    margin=dict(l=10, r=10, t=30, b=10)
+    margin=dict(l=10, r=10, t=40, b=10)
 )
 
 def dark_table(df, height=300):
@@ -44,9 +46,10 @@ def dark_table(df, height=300):
         f"font-weight:700;letter-spacing:1px;text-transform:uppercase;"
         f"border-bottom:2px solid #2d5a2a;white-space:nowrap'>{c}</th>"
         for c in df.columns)
-    h_css = f"max-height:{height}px;overflow-y:auto;overflow-x:auto;" if height else "overflow-x:auto;"
+    h_css = f"max-height:{height}px;overflow-y:auto;overflow-x:auto;"
     st.markdown(
-        f"<div style='background:#111c10;border:1px solid #1e2e1c;border-radius:8px;overflow:hidden;{h_css}'>"
+        f"<div style='background:#111c10;border:1px solid #1e2e1c;border-radius:8px;"
+        f"overflow:hidden;{h_css}'>"
         f"<table style='width:100%;border-collapse:collapse;background:#111c10'>"
         f"<thead><tr>{headers}</tr></thead><tbody>{rows}</tbody></table></div>",
         unsafe_allow_html=True)
@@ -62,7 +65,6 @@ def sb(table):
     return pd.DataFrame(r.data)
 
 def parse_dt(series):
-    """Parse timestamp preservando o offset original (-03)."""
     dt = pd.to_datetime(series, errors="coerce", utc=False)
     try:
         if dt.dt.tz is not None:
@@ -71,16 +73,13 @@ def parse_dt(series):
         pass
     return dt
 
-def is_trator(v):
-    """Apenas frotas com exatamente 4 dígitos numéricos."""
-    return bool(re.fullmatch(r'\d{4}', str(v).strip()))
-
 @st.cache_data(ttl=120, show_spinner=False)
 def load_os(_c):
     df = sb("ordem_servico")
     if df.empty: return df
     df["dt"] = parse_dt(df["created_at"])
     df["data_os"] = df["dt"].dt.date
+    df["mes_os"] = df["dt"].dt.to_period("M")
     df["dt_fmt"] = df["dt"].dt.strftime("%d/%m/%Y %H:%M")
     df["tempo_min"] = pd.to_numeric(df["tempo_min"], errors="coerce").fillna(0)
     return df
@@ -122,15 +121,9 @@ def load_transf(_c):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_disp(_c):
-    # Usa view filtrada: somente EQUIPAMENTO da dim_frota
     df = sb("vw_disponibilidade_equipamentos")
     if df.empty: return df
-    df["mes"] = pd.to_datetime(df["mes"], errors="coerce", utc=False)
-    try:
-        if df["mes"].dt.tz is not None:
-            df["mes"] = df["mes"].dt.tz_localize(None)
-    except Exception:
-        pass
+    df["mes"] = parse_dt(df["mes"])
     for col in ["dias_com_apontamento","horas_trabalhadas","horas_parada","disponibilidade_pct","total_os"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
     return df
@@ -190,63 +183,71 @@ with tab1:
         os_fin  = os_mes[os_mes["status"].str.upper().str.contains("FINAL", na=False)]
 
         c1,c2,c3,c4 = st.columns(4)
-        c1.metric("🔧 OS Hoje",        len(os_hoje))
+        c1.metric("🔧 OS Hoje",             len(os_hoje))
         c2.metric(f"📋 OS em {mes_ini.strftime('%b/%Y')}", len(os_mes))
-        c3.metric("🔴 Em Aberto/Pendente", len(os_aber))
-        c4.metric("✅ Finalizadas no Mês", len(os_fin))
+        c3.metric("🔴 Em Aberto/Pendente",  len(os_aber))
+        c4.metric("✅ Finalizadas no Mês",  len(os_fin))
 
-        # OS do dia — se não houver hoje mostra mensagem limpa
-        st.markdown('<div class="sec">OS do dia</div>', unsafe_allow_html=True)
-        if os_hoje.empty:
-            st.info(f"Nenhuma OS registrada hoje ({hoje.strftime('%d/%m/%Y')}). "
-                    f"Última OS: {df_os['numero_os'].iloc[0]} em {df_os['dt_fmt'].iloc[0]}")
+        # Filtro de mês
+        st.markdown('<div class="sec">OS do período</div>', unsafe_allow_html=True)
+
+        meses_disp = sorted(df_os["mes_os"].dropna().unique(), reverse=True)
+        meses_label = [str(m) for m in meses_disp]
+        mes_sel_label = st.selectbox(
+            "Selecionar mês:",
+            options=meses_label,
+            index=0,
+            key="sel_mes_os"
+        )
+        mes_sel = pd.Period(mes_sel_label, freq="M")
+        df_mes_sel = df_os[df_os["mes_os"] == mes_sel].sort_values("dt", ascending=False)
+
+        st.caption(f"Exibindo {min(10, len(df_mes_sel))} de {len(df_mes_sel)} OS em {mes_sel_label}")
+
+        if df_mes_sel.empty:
+            st.info(f"Nenhuma OS em {mes_sel_label}.")
         else:
-            df_t = os_hoje.sort_values("dt", ascending=False)[
+            df_t = df_mes_sel.head(10)[
                 ["numero_os","id_frota","sistema","tipo_manutencao","status","mecanico","dt_fmt"]].copy()
             df_t.columns = ["OS","Frota","Sistema","Tipo","Status","Mecânico","Data/Hora"]
-            dark_table(df_t, height=260)
+            dark_table(df_t, height=380)
 
-        # OS em aberto sempre visível
-        if not os_aber.empty:
-            st.markdown('<div class="sec">OS em aberto / pendente</div>', unsafe_allow_html=True)
-            df_ab = os_aber.sort_values("dt", ascending=False).head(10)[
-                ["numero_os","id_frota","sistema","tipo_manutencao","status","mecanico","dt_fmt"]].copy()
-            df_ab.columns = ["OS","Frota","Sistema","Tipo","Status","Mecânico","Abertura"]
-            dark_table(df_ab, height=300)
-
-        # Rankings do mês
-        if not os_mes.empty:
+        # Rankings do mês selecionado
+        if not df_mes_sel.empty:
             col_r1, col_r2 = st.columns(2)
             with col_r1:
-                st.markdown(f'<div class="sec">Sistemas mais acionados — {mes_ini.strftime("%b/%Y")}</div>', unsafe_allow_html=True)
-                r = os_mes.groupby("sistema").size().reset_index(name="qtd").sort_values("qtd",ascending=True).tail(8)
+                st.markdown(f'<div class="sec">Sistemas mais acionados — {mes_sel_label}</div>',
+                            unsafe_allow_html=True)
+                r = df_mes_sel.groupby("sistema").size().reset_index(name="qtd").sort_values("qtd",ascending=True).tail(8)
                 fig = go.Figure(go.Bar(
                     y=r["sistema"], x=r["qtd"], orientation="h",
                     marker_color="#2980b9",
                     text=r["qtd"], textposition="outside",
                     textfont=dict(color="#e8edd0",size=13),
-                    hovertemplate="<b>%{y}</b><br>OS: %{x}<extra></extra>"))
+                    hovertemplate="<b>%{y}</b><br>Quantidade de OS: <b>%{x}</b><extra></extra>"))
                 fig.update_layout(**PDARK, height=280,
                     xaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0")),
                     yaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0",size=12)))
                 st.plotly_chart(fig, use_container_width=True, key="k_sis")
 
             with col_r2:
-                st.markdown(f'<div class="sec">Equipamentos com mais OS — {mes_ini.strftime("%b/%Y")}</div>', unsafe_allow_html=True)
-                r = os_mes.groupby("id_frota").size().reset_index(name="qtd").sort_values("qtd",ascending=True).tail(8)
+                st.markdown(f'<div class="sec">Equipamentos com mais OS — {mes_sel_label}</div>',
+                            unsafe_allow_html=True)
+                r = df_mes_sel.groupby("id_frota").size().reset_index(name="qtd").sort_values("qtd",ascending=True).tail(8)
                 fig = go.Figure(go.Bar(
                     y=r["id_frota"], x=r["qtd"], orientation="h",
                     marker_color="#c0392b",
                     text=r["qtd"], textposition="outside",
                     textfont=dict(color="#e8edd0",size=13),
-                    hovertemplate="<b>Frota %{y}</b><br>OS: %{x}<extra></extra>"))
+                    hovertemplate="<b>Frota %{y}</b><br>Quantidade de OS: <b>%{x}</b><extra></extra>"))
                 fig.update_layout(**PDARK, height=280,
                     xaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0")),
                     yaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0",size=12)))
                 st.plotly_chart(fig, use_container_width=True, key="k_frota")
 
-            st.markdown(f'<div class="sec">Corretiva × Preventiva — {mes_ini.strftime("%b/%Y")}</div>', unsafe_allow_html=True)
-            r = os_mes["tipo_manutencao"].str.upper().value_counts().reset_index()
+            st.markdown(f'<div class="sec">Corretiva × Preventiva — {mes_sel_label}</div>',
+                        unsafe_allow_html=True)
+            r = df_mes_sel["tipo_manutencao"].str.upper().value_counts().reset_index()
             r.columns = ["tipo","qtd"]
             cores = {"CORRETIVA":"#c0392b","PREVENTIVA":"#4a9e3f"}
             fig = go.Figure(go.Bar(
@@ -254,19 +255,18 @@ with tab1:
                 marker_color=[cores.get(t,"#2980b9") for t in r["tipo"]],
                 text=r["qtd"], textposition="outside",
                 textfont=dict(color="#e8edd0",size=14),
-                hovertemplate="<b>%{x}</b><br>Quantidade: %{y}<extra></extra>"))
+                hovertemplate="<b>%{x}</b><br>Quantidade: <b>%{y}</b><extra></extra>"))
             fig.update_layout(**PDARK, height=220,
                 xaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0",size=13)),
                 yaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0")))
             st.plotly_chart(fig, use_container_width=True, key="k_tipo")
 
 # ══════════════════════════════════════════════════════════════
-# TAB 2 — LUBRIFICAÇÃO (em cima) + BORRACHARIA (embaixo)
+# TAB 2 — LUBRIFICAÇÃO + BORRACHARIA
 # ══════════════════════════════════════════════════════════════
 with tab2:
-
-    # ── LUBRIFICAÇÃO ── (seção principal, topo)
-    st.markdown('<div class="sec">Lubrificação — horímetros de troca de óleo</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">Lubrificação — horímetros de troca de óleo</div>',
+                unsafe_allow_html=True)
     if df_lub.empty:
         st.info("Sem dados de lubrificação.")
     else:
@@ -279,8 +279,8 @@ with tab2:
         l3.metric("🔴 Em Atraso",     atr)
         l4.metric("📋 Total",         len(df_lub))
 
-        # Velocímetros — 3 por linha
-        st.markdown('<div class="sec">Velocímetros — ordenados por urgência</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec">Velocímetros — ordenados por urgência (3 por linha)</div>',
+                    unsafe_allow_html=True)
         dg = df_lub.sort_values("horas_restantes", ascending=True).head(9)
         for i in range(0, len(dg), 3):
             cols3 = st.columns(3)
@@ -309,7 +309,8 @@ with tab2:
                            "font":{"color":"#e8edd0","size":11}},
                     gauge={
                         "axis":{"range":[emin,emax],
-                                "tickcolor":"#4a6644","tickfont":{"color":"#c8d8c0","size":8}},
+                                "tickcolor":"#4a6644",
+                                "tickfont":{"color":"#c8d8c0","size":8}},
                         "bar":{"color":cor,"thickness":0.3},
                         "bgcolor":"#0d180c","bordercolor":"#1e2e1c",
                         "steps":[
@@ -324,20 +325,23 @@ with tab2:
                 fg.update_layout(paper_bgcolor="#111c10",plot_bgcolor="#111c10",
                                  height=190,margin=dict(l=8,r=8,t=60,b=5))
                 with col:
-                    st.plotly_chart(fg, use_container_width=True, key=f"g_{row['vehicle']}_{idx}")
+                    st.plotly_chart(fg, use_container_width=True,
+                                    key=f"g_{row['vehicle']}_{idx}")
 
-        # Tabela lubrificação completa
-        st.markdown('<div class="sec">Lista completa — ordenada por urgência</div>', unsafe_allow_html=True)
-        def badge(s): return {"OK":"🟢 OK","PROXIMO":"🟡 PRÓXIMO","EM ATRASO":"🔴 EM ATRASO"}.get(s,f"⚪ {s}")
-        dt = df_lub[["vehicle","h_na_troca","h_proxima_troca","h_atual","horas_restantes","status_troca"]].copy()
-        dt["horas_restantes"] = dt["horas_restantes"].apply(lambda v: f"{v:+.0f}h" if pd.notna(v) else "—")
+        st.markdown('<div class="sec">Lista completa — ordenada por urgência</div>',
+                    unsafe_allow_html=True)
+        def badge(s):
+            return {"OK":"🟢 OK","PROXIMO":"🟡 PRÓXIMO","EM ATRASO":"🔴 EM ATRASO"}.get(s,f"⚪ {s}")
+        dt = df_lub[["vehicle","h_na_troca","h_proxima_troca","h_atual",
+                     "horas_restantes","status_troca"]].copy()
+        dt["horas_restantes"] = dt["horas_restantes"].apply(
+            lambda v: f"{v:+.0f}h" if pd.notna(v) else "—")
         dt["status_troca"] = dt["status_troca"].apply(badge)
         dt.columns = ["Frota","H. Troca","Próxima (h)","H. Atual","Restante","Status"]
         dark_table(dt, height=300)
 
     st.divider()
 
-    # ── BORRACHARIA ── (seção secundária, abaixo)
     st.markdown('<div class="sec">Borracharia — OS recentes</div>', unsafe_allow_html=True)
     if df_bor.empty:
         st.info("Sem registros de borracharia.")
@@ -347,7 +351,8 @@ with tab2:
         bk2.metric("Hoje",      len(df_bor[df_bor["data_os"]==hoje]))
         bk3.metric("Total",     len(df_bor))
 
-        cols_b = [c for c in ["numero_os","id_frota","tipo_manutencao","borracheiro","status","descricao","dt_fmt"] if c in df_bor.columns]
+        cols_b = [c for c in ["numero_os","id_frota","tipo_manutencao","borracheiro",
+                               "status","descricao","dt_fmt"] if c in df_bor.columns]
         db = df_bor.sort_values("dt",ascending=False).head(5)[cols_b].copy()
         db.columns = [c.replace("dt_fmt","Data/Hora").replace("_"," ").title() for c in cols_b]
         dark_table(db, height=280)
@@ -357,7 +362,8 @@ with tab2:
 # ══════════════════════════════════════════════════════════════
 with tab3:
     CAP = 5000
-    tcb  = df_transf[df_transf["destino"].str.upper().str.contains("COMBOIO",na=False)] if not df_transf.empty else pd.DataFrame()
+    tcb  = df_transf[df_transf["destino"].str.upper().str.contains("COMBOIO",na=False)] \
+           if not df_transf.empty else pd.DataFrame()
     trec = tcb["quantidade_l"].sum() if not tcb.empty else 0
     tdist= df_abast["liters"].sum() if not df_abast.empty else 0
     saldo= max(0, trec-tdist)
@@ -375,20 +381,27 @@ with tab3:
     fig_tank = go.Figure(go.Indicator(
         mode="gauge+number", value=round(pct,1),
         number={"suffix":"%","font":{"color":"#e8edd0","size":28}},
-        title={"text":f"<b style='color:#e8edd0'>Saldo: {fmt(saldo)} L</b><br>"
-                      f"<span style='font-size:12px;color:#c8d8c0'>"
-                      f"Recebido: {fmt(trec)} L · Distribuído: {fmt(tdist)} L</span>",
+        title={"text":
+               f"<b style='color:#e8edd0'>Saldo estimado: {fmt(saldo)} L</b><br>"
+               f"<span style='font-size:12px;color:#c8d8c0'>"
+               f"Recebido do posto: {fmt(trec)} L &nbsp;·&nbsp; "
+               f"Distribuído às máquinas: {fmt(tdist)} L</span>",
                "font":{"color":"#e8edd0","size":14}},
-        gauge={"axis":{"range":[0,100],"ticksuffix":"%","tickcolor":"#4a6644",
-                       "tickfont":{"color":"#c8d8c0","size":10}},
-               "bar":{"color":cor_s,"thickness":0.3},
-               "bgcolor":"#0d180c","bordercolor":"#1e2e1c",
-               "steps":[{"range":[0,20],"color":"#2a1010"},
-                        {"range":[20,40],"color":"#2a2200"},
-                        {"range":[40,100],"color":"#1a3318"}],
-               "threshold":{"line":{"color":"#e74c3c","width":3},"thickness":0.8,"value":20}}))
+        gauge={
+            "axis":{"range":[0,100],"ticksuffix":"%",
+                    "tickcolor":"#4a6644","tickfont":{"color":"#c8d8c0","size":10}},
+            "bar":{"color":cor_s,"thickness":0.3},
+            "bgcolor":"#0d180c","bordercolor":"#1e2e1c",
+            "steps":[
+                {"range":[0,20], "color":"#2a1010"},
+                {"range":[20,40],"color":"#2a2200"},
+                {"range":[40,100],"color":"#1a3318"},
+            ],
+            "threshold":{"line":{"color":"#e74c3c","width":3},"thickness":0.8,"value":20},
+        }
+    ))
     fig_tank.update_layout(paper_bgcolor="#111c10",plot_bgcolor="#111c10",
-                           height=260,margin=dict(l=30,r=30,t=60,b=10))
+                           height=260,margin=dict(l=30,r=30,t=70,b=10))
     st.plotly_chart(fig_tank, use_container_width=True, key="k_tank")
 
     cc1, cc2 = st.columns(2)
@@ -397,35 +410,40 @@ with tab3:
         if ah.empty:
             st.info(f"Nenhum abastecimento hoje ({hoje.strftime('%d/%m/%Y')}).")
         else:
-            cols_a = [c for c in ["dt_fmt","vehicle","operator","fuel_type","liters","hourmeter"] if c in ah.columns]
+            cols_a = [c for c in ["dt_fmt","vehicle","operator","fuel_type","liters","hourmeter"]
+                      if c in ah.columns]
             da = ah.sort_values("dt",ascending=False).head(10)[cols_a].copy()
             da.columns = [c.replace("dt_fmt","Hora").replace("_"," ").title() for c in cols_a]
             dark_table(da, height=350)
 
     with cc2:
-        st.markdown('<div class="sec">Últimas 3 transferências posto → comboio</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec">Últimas 3 transferências posto → comboio</div>',
+                    unsafe_allow_html=True)
         if tcb.empty:
             st.info("Nenhuma transferência registrada.")
         else:
-            cols_t = [c for c in ["data","combustivel","origem","quantidade_l","observacao"] if c in tcb.columns]
+            cols_t = [c for c in ["data","combustivel","origem","quantidade_l","observacao"]
+                      if c in tcb.columns]
             dt2 = tcb.sort_values("data",ascending=False).head(3)[cols_t].copy()
             dt2["data"] = pd.to_datetime(dt2["data"]).dt.strftime("%d/%m/%Y")
             dt2["quantidade_l"] = dt2["quantidade_l"].apply(lambda v: f"{fmt(v)} L")
             dt2.columns = [c.replace("_"," ").title() for c in cols_t]
             dark_table(dt2, height=180)
 
-        st.markdown(f'<div class="sec">Volume por frota — {mes_ini.strftime("%b/%Y")} (L)</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="sec">Volume por frota — {mes_ini.strftime("%b/%Y")} (L)</div>',
+                    unsafe_allow_html=True)
         if not df_abast.empty:
             dm = df_abast[df_abast["data_os"]>=mes_ini]
             if not dm.empty and "vehicle" in dm.columns:
-                pf = dm.groupby("vehicle")["liters"].sum().reset_index().sort_values("liters",ascending=True).tail(8)
+                pf = (dm.groupby("vehicle")["liters"].sum()
+                       .reset_index().sort_values("liters",ascending=True).tail(8))
                 fig = go.Figure(go.Bar(
                     y=pf["vehicle"], x=pf["liters"], orientation="h",
                     marker_color="#4a9e3f",
                     text=pf["liters"].apply(lambda v: f"{v:,.0f}L"),
                     textposition="outside",
                     textfont=dict(color="#e8edd0",size=12),
-                    hovertemplate="<b>Frota %{y}</b><br>Litros: %{x:,.0f} L<extra></extra>"))
+                    hovertemplate="<b>Frota %{y}</b><br>Volume: <b>%{x:,.0f} L</b><extra></extra>"))
                 fig.update_layout(**PDARK, height=250,
                     xaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0")),
                     yaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0",size=12)))
@@ -438,111 +456,184 @@ with tab4:
     if df_disp.empty:
         st.warning("Sem dados de disponibilidade.")
     else:
-        dmes = df_disp[
-            (df_disp["mes"].dt.month == hoje.month) &
-            (df_disp["mes"].dt.year  == hoje.year)
-        ].copy()
+        # Filtro de mês
+        meses_d = sorted(df_disp["mes"].dt.to_period("M").unique(), reverse=True)
+        meses_d_label = [str(m) for m in meses_d]
+        mes_d_sel = st.selectbox(
+            "Mês de referência:",
+            options=meses_d_label,
+            index=0,
+            key="sel_mes_disp"
+        )
+        mp = pd.Period(mes_d_sel, freq="M")
+        dmes = df_disp[df_disp["mes"].dt.to_period("M") == mp].copy()
+
         if dmes.empty:
-            dmes = df_disp.copy()
+            st.info(f"Sem dados para {mes_d_sel}.")
+        else:
+            mlabel = mes_d_sel
+            dm  = dmes["disponibilidade_pct"].mean()
+            ht  = dmes["horas_trabalhadas"].sum()
+            hp  = dmes["horas_parada"].sum()
+            nf  = dmes["id_frota"].nunique()
+            cr  = (dmes["disponibilidade_pct"]<70).sum()
 
-        mlabel = dmes["mes"].dt.strftime("%B/%Y").iloc[0] if not dmes.empty else "—"
-        dm  = dmes["disponibilidade_pct"].mean()
-        ht  = dmes["horas_trabalhadas"].sum()
-        hp  = dmes["horas_parada"].sum()
-        nf  = dmes["id_frota"].nunique()
-        cr  = (dmes["disponibilidade_pct"]<70).sum()
+            st.markdown(
+                f'<div class="sec">Tratores & Equipamentos · {mlabel} · '
+                f'{nf} máquinas · horas acumuladas no mês</div>',
+                unsafe_allow_html=True)
 
-        st.markdown(
-            f'<div class="sec">Equipamentos (tratores/carregadeiras) · {mlabel} · {nf} equipamentos · '
-            f'Horas acumuladas desde 01/{hoje.strftime("%m/%Y")}</div>',
-            unsafe_allow_html=True)
+            k1,k2,k3,k4,k5 = st.columns(5)
+            k1.metric("📊 Disponib. Média",  f"{dm:.1f}%",
+                      help="Média de disponibilidade de todos os equipamentos no mês")
+            k2.metric("⚙️ H. Trabalhadas",   f"{fmt(ht)}h",
+                      help=f"Total de horas com apontamento de produção em {mlabel}")
+            k3.metric("🔴 H. Paradas",        f"{fmt(hp)}h",
+                      help="Horas sem apontamento — manutenção ou inatividade")
+            k4.metric("🚜 Equipamentos",      nf,
+                      help="Tratores, carregadeiras e colhedeira monitorados")
+            k5.metric("⚠️ Críticos <70%",     cr,
+                      help="Equipamentos abaixo da meta mínima de disponibilidade")
 
-        k1,k2,k3,k4,k5 = st.columns(5)
-        k1.metric("📊 Disponib. Média",  f"{dm:.1f}%")
-        k2.metric("⚙️ H. Trabalhadas",   f"{fmt(ht)}h", help=f"Acumulado em {mlabel}")
-        k3.metric("🔴 H. Paradas",        f"{fmt(hp)}h", help="OS abertas e manutenção")
-        k4.metric("🚜 Equipamentos",      nf)
-        k5.metric("⚠️ Críticos <70%",     cr)
+            # Gauge geral
+            cor_d = "#c0392b" if dm<70 else "#d4a017" if dm<85 else "#4a9e3f"
+            fg = go.Figure(go.Indicator(
+                mode="gauge+number", value=round(dm,1),
+                number={"suffix":"%","font":{"color":"#e8edd0","size":36}},
+                title={"text":
+                       f"<b style='color:#e8edd0'>Disponibilidade Média · {mlabel}</b><br>"
+                       f"<span style='font-size:12px;color:#c8d8c0'>"
+                       f"{nf} equipamentos · {fmt(ht)}h trabalhadas · {fmt(hp)}h paradas</span>",
+                       "font":{"color":"#e8edd0","size":14}},
+                gauge={
+                    "axis":{"range":[0,100],"ticksuffix":"%",
+                            "tickcolor":"#4a6644","tickfont":{"color":"#c8d8c0","size":10}},
+                    "bar":{"color":cor_d,"thickness":0.3},
+                    "bgcolor":"#0d180c","bordercolor":"#1e2e1c",
+                    "steps":[
+                        {"range":[0,70], "color":"#2a1010"},
+                        {"range":[70,85],"color":"#2a2200"},
+                        {"range":[85,100],"color":"#1a3318"},
+                    ],
+                    "threshold":{"line":{"color":"#d4a017","width":2},
+                                 "thickness":0.8,"value":85},
+                }
+            ))
+            fg.update_layout(paper_bgcolor="#111c10",plot_bgcolor="#111c10",
+                             height=260,margin=dict(l=30,r=30,t=70,b=10))
+            st.plotly_chart(fg, use_container_width=True, key="k_disp_g")
 
-        cor_d = "#c0392b" if dm<70 else "#d4a017" if dm<85 else "#4a9e3f"
-        fg = go.Figure(go.Indicator(
-            mode="gauge+number", value=round(dm,1),
-            number={"suffix":"%","font":{"color":"#e8edd0","size":36}},
-            title={"text":f"<b style='color:#e8edd0'>Disponibilidade Média · {mlabel}</b><br>"
-                          f"<span style='font-size:12px;color:#c8d8c0'>"
-                          f"{nf} equipamentos · {fmt(ht)}h trabalhadas · {fmt(hp)}h paradas</span>",
-                   "font":{"color":"#e8edd0","size":14}},
-            gauge={"axis":{"range":[0,100],"ticksuffix":"%","tickcolor":"#4a6644",
-                           "tickfont":{"color":"#c8d8c0","size":10}},
-                   "bar":{"color":cor_d,"thickness":0.3},
-                   "bgcolor":"#0d180c","bordercolor":"#1e2e1c",
-                   "steps":[{"range":[0,70],"color":"#2a1010"},
-                             {"range":[70,85],"color":"#2a2200"},
-                             {"range":[85,100],"color":"#1a3318"}],
-                   "threshold":{"line":{"color":"#d4a017","width":2},"thickness":0.8,"value":85}}))
-        fg.update_layout(paper_bgcolor="#111c10",plot_bgcolor="#111c10",
-                         height=260,margin=dict(l=30,r=30,t=60,b=10))
-        st.plotly_chart(fg, use_container_width=True, key="k_disp_g")
+            cd1, cd2 = st.columns(2)
+            with cd1:
+                st.markdown(
+                    f'<div class="sec">H. trabalhadas × paradas · {mlabel}<br>'
+                    f'<span style="font-size:10px;color:#4a6644;font-weight:400;letter-spacing:0">'
+                    f'Passe o mouse sobre as barras para ver os valores</span></div>',
+                    unsafe_allow_html=True)
+                dd = dmes.sort_values("horas_trabalhadas", ascending=True)
+                # Adicionar modelo ao label
+                modelo_map = {}
+                if "modelo" in dmes.columns:
+                    modelo_map = dict(zip(dmes["id_frota"], dmes["modelo"]))
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    name="✅ Trabalhadas",
+                    y=dd["id_frota"], x=dd["horas_trabalhadas"],
+                    orientation="h", marker_color="#4a9e3f",
+                    text=dd["horas_trabalhadas"].apply(lambda v: f"{v:.0f}h"),
+                    textposition="inside", textfont=dict(color="#ffffff",size=11),
+                    hovertemplate=(
+                        "<b>Frota %{y}</b><br>" +
+                        ("<b>%{customdata}</b><br>" if modelo_map else "") +
+                        "Horas trabalhadas: <b>%{x:.0f}h</b><br>"
+                        "Dias com apontamento: ver tabela abaixo<extra></extra>"),
+                    customdata=dd["id_frota"].map(modelo_map) if modelo_map else None
+                ))
+                fig.add_trace(go.Bar(
+                    name="🔴 Paradas",
+                    y=dd["id_frota"], x=dd["horas_parada"],
+                    orientation="h", marker_color="#c0392b",
+                    text=dd["horas_parada"].apply(lambda v: f"{v:.0f}h" if v>0 else ""),
+                    textposition="inside", textfont=dict(color="#ffffff",size=11),
+                    hovertemplate=(
+                        "<b>Frota %{y}</b><br>" +
+                        ("<b>%{customdata}</b><br>" if modelo_map else "") +
+                        "Horas paradas: <b>%{x:.0f}h</b><br>"
+                        "(manutenção / sem apontamento)<extra></extra>"),
+                    customdata=dd["id_frota"].map(modelo_map) if modelo_map else None
+                ))
+                fig.update_layout(
+                    **PDARK, barmode="stack",
+                    height=max(320, len(dd)*32),
+                    legend=dict(orientation="h",y=1.05,x=0,
+                                font=dict(color="#e8edd0",size=12)),
+                    xaxis=dict(title="Horas acumuladas no mês",
+                               gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0")),
+                    yaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0",size=12)))
+                st.plotly_chart(fig, use_container_width=True, key="k_stack")
 
-        cd1, cd2 = st.columns(2)
-        with cd1:
-            st.markdown(f'<div class="sec">H. trabalhadas × paradas por frota · {mlabel}</div>', unsafe_allow_html=True)
-            dd = dmes.sort_values("horas_trabalhadas", ascending=True)
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                name="Trabalhadas", y=dd["id_frota"], x=dd["horas_trabalhadas"],
-                orientation="h", marker_color="#4a9e3f",
-                text=dd["horas_trabalhadas"].apply(lambda v: f"{v:.0f}h"),
-                textposition="inside", textfont=dict(color="#ffffff",size=11),
-                hovertemplate="<b>Frota %{y}</b><br>Trabalhadas: %{x:.0f}h<extra></extra>"))
-            fig.add_trace(go.Bar(
-                name="Paradas", y=dd["id_frota"], x=dd["horas_parada"],
-                orientation="h", marker_color="#c0392b",
-                text=dd["horas_parada"].apply(lambda v: f"{v:.0f}h" if v>0 else ""),
-                textposition="inside", textfont=dict(color="#ffffff",size=11),
-                hovertemplate="<b>Frota %{y}</b><br>Paradas: %{x:.0f}h<extra></extra>"))
-            fig.update_layout(**PDARK, barmode="stack",
-                height=max(300,len(dd)*30),
-                legend=dict(orientation="h",y=1.05,x=0,font=dict(color="#e8edd0",size=12)),
-                xaxis=dict(title="Horas",gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0")),
-                yaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0",size=12)))
-            st.plotly_chart(fig, use_container_width=True, key="k_stack")
+            with cd2:
+                st.markdown(
+                    f'<div class="sec">Disponibilidade % · {mlabel}<br>'
+                    f'<span style="font-size:10px;color:#4a6644;font-weight:400;letter-spacing:0">'
+                    f'🟢 ≥85% meta &nbsp;·&nbsp; 🟡 70–85% atenção &nbsp;·&nbsp; 🔴 &lt;70% crítico</span></div>',
+                    unsafe_allow_html=True)
+                dd2 = dmes.sort_values("disponibilidade_pct", ascending=True)
+                cores = dd2["disponibilidade_pct"].apply(
+                    lambda v: "#c0392b" if v<70 else "#d4a017" if v<85 else "#4a9e3f")
+                fig = go.Figure(go.Bar(
+                    y=dd2["id_frota"], x=dd2["disponibilidade_pct"],
+                    orientation="h", marker_color=cores.tolist(),
+                    text=dd2["disponibilidade_pct"].apply(lambda v: f"{v:.1f}%"),
+                    textposition="outside",
+                    textfont=dict(color="#e8edd0",size=12),
+                    customdata=dd2["id_frota"].map(modelo_map) if modelo_map else dd2["id_frota"],
+                    hovertemplate=(
+                        "<b>Frota %{y}</b><br>"
+                        "<b>%{customdata}</b><br>"
+                        "Disponibilidade: <b>%{x:.1f}%</b><br>"
+                        "Meta: 85% &nbsp;·&nbsp; Crítico: 70%<extra></extra>")))
+                fig.add_vline(x=85, line_color="#4a9e3f", line_dash="dot", line_width=1,
+                    annotation_text="Meta 85%",
+                    annotation_font=dict(color="#6fcf60",size=11),
+                    annotation_position="top right")
+                fig.add_vline(x=70, line_color="#c0392b", line_dash="dash", line_width=1,
+                    annotation_text="Crítico 70%",
+                    annotation_font=dict(color="#e74c3c",size=11),
+                    annotation_position="bottom right")
+                fig.update_layout(
+                    **PDARK, height=max(320,len(dd2)*32),
+                    xaxis_range=[0,115],
+                    xaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0")),
+                    yaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0",size=12)))
+                st.plotly_chart(fig, use_container_width=True, key="k_disp_bar")
 
-        with cd2:
-            st.markdown(f'<div class="sec">Disponibilidade % por frota · {mlabel}</div>', unsafe_allow_html=True)
-            dd2 = dmes.sort_values("disponibilidade_pct", ascending=True)
-            cores = dd2["disponibilidade_pct"].apply(
-                lambda v: "#c0392b" if v<70 else "#d4a017" if v<85 else "#4a9e3f")
-            fig = go.Figure(go.Bar(
-                y=dd2["id_frota"], x=dd2["disponibilidade_pct"],
-                orientation="h", marker_color=cores.tolist(),
-                text=dd2["disponibilidade_pct"].apply(lambda v: f"{v:.1f}%"),
-                textposition="outside", textfont=dict(color="#e8edd0",size=12),
-                hovertemplate="<b>Frota %{y}</b><br>Disponibilidade: %{x:.1f}%<extra></extra>"))
-            fig.add_vline(x=85,line_color="#4a9e3f",line_dash="dot",line_width=1,
-                annotation_text="Meta 85%",annotation_font_color="#6fcf60",
-                annotation_position="top right")
-            fig.add_vline(x=70,line_color="#c0392b",line_dash="dash",line_width=1,
-                annotation_text="Crítico 70%",annotation_font_color="#e74c3c",
-                annotation_position="bottom right")
-            fig.update_layout(**PDARK, height=max(300,len(dd2)*30),
-                xaxis_range=[0,115],
-                xaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0")),
-                yaxis=dict(gridcolor="#1e2e1c",tickfont=dict(color="#e8edd0",size=12)))
-            st.plotly_chart(fig, use_container_width=True, key="k_disp_bar")
+            # Tabela resumo
+            st.markdown(f'<div class="sec">Resumo por equipamento · {mlabel}</div>',
+                        unsafe_allow_html=True)
+            def bd(v):
+                return f"🔴 {v:.1f}%" if v<70 else f"🟡 {v:.1f}%" if v<85 else f"🟢 {v:.1f}%"
 
-        st.markdown(f'<div class="sec">Resumo por equipamento · {mlabel}</div>', unsafe_allow_html=True)
-        def bd(v): return f"🔴 {v:.1f}%" if v<70 else f"🟡 {v:.1f}%" if v<85 else f"🟢 {v:.1f}%"
-        dt3 = dmes[["id_frota","dias_com_apontamento","horas_trabalhadas",
-                    "horas_parada","disponibilidade_pct","total_os"]].copy()
-        dt3 = dt3.sort_values("disponibilidade_pct", ascending=True)
-        dt3["disponibilidade_pct"] = dt3["disponibilidade_pct"].apply(bd)
-        dt3["horas_trabalhadas"] = dt3["horas_trabalhadas"].apply(lambda v: f"{v:.0f}h")
-        dt3["horas_parada"] = dt3["horas_parada"].apply(lambda v: f"{v:.0f}h")
-        dt3.columns = ["Frota","Dias Ativos","H. Trabalhadas","H. Paradas","Disponib. %","OS no Mês"]
-        dark_table(dt3, height=380)
+            cols_t = ["id_frota","dias_com_apontamento","horas_trabalhadas",
+                      "horas_parada","disponibilidade_pct","total_os"]
+            if "modelo" in dmes.columns:
+                cols_t = ["id_frota","modelo"] + cols_t[1:]
+
+            dt3 = dmes[cols_t].copy().sort_values("disponibilidade_pct", ascending=True)
+            dt3["disponibilidade_pct"] = dt3["disponibilidade_pct"].apply(bd)
+            dt3["horas_trabalhadas"]   = dt3["horas_trabalhadas"].apply(lambda v: f"{v:.0f}h")
+            dt3["horas_parada"]        = dt3["horas_parada"].apply(lambda v: f"{v:.0f}h")
+
+            if "modelo" in dt3.columns:
+                dt3.columns = ["Frota","Modelo","Dias Ativos","H. Trabalhadas",
+                                "H. Paradas","Disponib. %","OS no Mês"]
+            else:
+                dt3.columns = ["Frota","Dias Ativos","H. Trabalhadas",
+                                "H. Paradas","Disponib. %","OS no Mês"]
+            dark_table(dt3, height=400)
 
 st.divider()
-st.markdown("<div style='text-align:center;font-size:11px;color:#4a6644;'>"
-            "Santa Vergínia Agropecuária e Florestal · Controladoria · Gestor Oficina</div>",
-            unsafe_allow_html=True)
+st.markdown(
+    "<div style='text-align:center;font-size:11px;color:#4a6644;'>"
+    "Santa Vergínia Agropecuária e Florestal · Controladoria · Gestor Oficina</div>",
+    unsafe_allow_html=True)
