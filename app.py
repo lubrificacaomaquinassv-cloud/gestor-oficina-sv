@@ -65,12 +65,12 @@ def sb(table):
     return pd.DataFrame(r.data)
 
 def parse_dt(series):
-    dt = pd.to_datetime(series, errors="coerce", utc=False)
-    try:
-        if dt.dt.tz is not None:
-            dt = dt.dt.tz_localize(None)
-    except Exception:
-        pass
+    """Parse timestamp com offset -03:00 para datetime naive (sem tz).
+    Estratégia: converter para UTC, depois subtrair 3h, depois remover tz.
+    Isso garante que 2026-06-06 16:05 -03:00 vira 2026-06-06 16:05 naive."""
+    dt = pd.to_datetime(series, errors="coerce", utc=True)  # interpreta o offset corretamente
+    dt = dt.dt.tz_convert("America/Sao_Paulo")              # converte para Brasília
+    dt = dt.dt.tz_localize(None)                            # remove tz, mantém o horário de Brasília
     return dt
 
 @st.cache_data(ttl=120, show_spinner=False)
