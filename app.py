@@ -372,8 +372,9 @@ def colunas_custo(df):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_financeiro(_c):
+    """Carrega financeiro_os (repo sigcf-financeiro / financeiro_app.py)."""
     try:
-        df = sb("financeiro_os", order_col="created_at", desc=True)
+        df = sb("financeiro_os", order_col="criado_em", desc=True)
         if df.empty:
             df = sb("financeiro_os")
     except Exception:
@@ -381,28 +382,51 @@ def load_financeiro(_c):
     if df.empty:
         return df
     df = df.copy()
-    if "valor_unitario" in df.columns and "quantidade" in df.columns:
+    # Colunas reais: peca_valor, quantidade, valor_total_pecas, custo_mo, custo_total_os, criado_em, tipo_os
+    if "valor_total_pecas" in df.columns:
+        df["v_peca"] = pd.to_numeric(df["valor_total_pecas"], errors="coerce").fillna(0)
+    elif "peca_valor" in df.columns and "quantidade" in df.columns:
+        df["v_peca"] = (
+            pd.to_numeric(df["peca_valor"], errors="coerce").fillna(0)
+            * pd.to_numeric(df["quantidade"], errors="coerce").fillna(1)
+        )
+    elif "valor_unitario" in df.columns and "quantidade" in df.columns:
         df["v_peca"] = (
             pd.to_numeric(df["valor_unitario"], errors="coerce").fillna(0)
             * pd.to_numeric(df["quantidade"], errors="coerce").fillna(1)
         )
-    elif "valor_total" in df.columns:
-        df["v_peca"] = pd.to_numeric(df["valor_total"], errors="coerce").fillna(0)
     else:
         df["v_peca"] = 0
     df["custo_mo"] = pd.to_numeric(
         df["custo_mo"] if "custo_mo" in df.columns else 0, errors="coerce"
     ).fillna(0)
-    if "custo_total_os" in df.columns:
-        df["total_os"] = pd.to_numeric(df["custo_total_os"], errors="coerce").fillna(0)
-    if "created_at" in df.columns:
-        df["mes_key"] = parse_mes_key(parse_dt(df["created_at"]))
-    elif "mes" in df.columns:
-        df["mes_key"] = parse_mes_key(df["mes"])
-    mod_col = next((c for c in ("modulo", "tipo_modulo", "origem") if c in df.columns), None)
+    dt_col = "criado_em" if "criado_em" in df.columns else "created_at"
+    if dt_col in df.columns:
+        df["mes_key"] = parse_mes_key(parse_dt(df[dt_col]))
+    mod_col = "tipo_os" if "tipo_os" in df.columns else None
     if mod_col:
         df["modulo"] = df[mod_col].astype(str).str.upper()
     return df
+
+
+def norm_os(series):
+    return series.astype(str).str.strip().str.upper()
+
+
+def financeiro_do_mes(df_fin, df_os_mes, mes_label):
+    """Custos das OS do mês selecionado (por numero_os, não só data do lançamento)."""
+    if df_fin.empty:
+        return df_fin
+    if not df_os_mes.empty and "numero_os" in df_os_mes.columns and "numero_os" in df_fin.columns:
+        nums = set(norm_os(df_os_mes["numero_os"]))
+        out = df_fin[norm_os(df_fin["numero_os"]).isin(nums)].copy()
+        if not out.empty:
+            return out
+    if "mes_key" in df_fin.columns:
+        out = df_fin[df_fin["mes_key"] == mes_label].copy()
+        if not out.empty:
+            return out
+    return df_fin.copy()
 
 
 def resumo_financeiro_os(df_fin):
@@ -415,12 +439,10 @@ def resumo_financeiro_os(df_fin):
     ).reset_index()
     if "id_frota" in df_fin.columns:
         res = res.merge(g["id_frota"].first().reset_index(), on="numero_os", how="left")
-    if "total_os" in df_fin.columns:
-        res = res.merge(g["total_os"].max().rename("total_os").reset_index(), on="numero_os", how="left")
-        res["total"] = res["total_os"].fillna(res["pecas"] + res["custo_mo"])
-        res = res.drop(columns=["total_os"])
-    else:
-        res["total"] = res["pecas"] + res["custo_mo"]
+    if "custo_total_os" in df_fin.columns:
+        res = res.merge(g["custo_total_os"].max().reset_index(), on="numero_os", how="left")
+        res = res.drop(columns=["custo_total_os"])
+    res["total"] = res["pecas"] + res["custo_mo"]
     return res
 
 
@@ -536,7 +558,7 @@ with tab1:
         st.caption(f"{len(df_mes_sel)} OS em {mes_sel_label}")
 
         if not df_mes_sel.empty:
-            fin_mes = df_fin[df_fin["mes_key"] == mes_sel_label] if not df_fin.empty and "mes_key" in df_fin.columns else pd.DataFrame()
+            fin_mes = financeiro_do_mes(df_fin, df_mes_sel, mes_sel_label)
             res_fin = resumo_financeiro_os(fin_mes)
 
             if not res_fin.empty:
