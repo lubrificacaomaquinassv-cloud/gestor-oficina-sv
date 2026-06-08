@@ -42,7 +42,6 @@ PDARK = dict(
 PLOT_AXIS = dict(
     gridcolor="#1e2e1c",
     tickfont=dict(color="#e8edd0"),
-    titlefont=dict(color="#8aab80"),
 )
 
 
@@ -145,9 +144,35 @@ def sb(table):
 
 
 def parse_dt(series):
-    dt = pd.to_datetime(series, errors="coerce", utc=True)
-    dt = dt.dt.tz_convert("America/Sao_Paulo")
-    return dt.dt.tz_localize(None)
+    """Converte timestamps para horário de Brasília (naive)."""
+    raw = series.astype(str).str.strip()
+    has_tz = raw.str.contains(r"[+-]\d{2}:\d{2}|Z$", regex=True, na=False)
+    dt = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    if has_tz.any():
+        dt.loc[has_tz] = (
+            pd.to_datetime(raw[has_tz], errors="coerce", utc=True)
+            .dt.tz_convert("America/Sao_Paulo")
+            .dt.tz_localize(None)
+        )
+    if (~has_tz).any():
+        dt.loc[~has_tz] = pd.to_datetime(raw[~has_tz], errors="coerce")
+    return dt
+
+
+def os_numero(series):
+    return pd.to_numeric(
+        series.astype(str).str.extract(r"(\d+)", expand=False),
+        errors="coerce",
+    ).fillna(0).astype(int)
+
+
+def melhor_data_os(df):
+    """Monta datetime da OS usando created_at e, se faltar, updated_at."""
+    dt = parse_dt(df["created_at"]) if "created_at" in df.columns else pd.Series(pd.NaT, index=df.index)
+    for col in ("updated_at", "data_abertura", "data_fechamento", "criado_em"):
+        if col in df.columns:
+            dt = dt.fillna(parse_dt(df[col]))
+    return dt
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -155,12 +180,13 @@ def load_os(_c):
     df = sb("ordem_servico")
     if df.empty:
         return df
-    df["dt"] = parse_dt(df["created_at"])
+    df["dt"] = melhor_data_os(df)
     df["data_os"] = df["dt"].dt.date
     df["mes_os"] = df["dt"].dt.to_period("M")
     df["dt_fmt"] = df["dt"].dt.strftime("%d/%m/%Y %H:%M")
+    df["os_num"] = os_numero(df["numero_os"])
     df["tempo_min"] = pd.to_numeric(df["tempo_min"], errors="coerce").fillna(0)
-    return df
+    return df.sort_values(["os_num", "dt"], ascending=False)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -288,8 +314,9 @@ with tab1:
     if df_os.empty:
         st.warning("Sem dados de OS.")
     else:
-        os_hoje = df_os[df_os["data_os"] == hoje].sort_values("dt", ascending=False)
-        os_mes = df_os[df_os["data_os"] >= mes_ini]
+        mes_atual = pd.Period(mes_atual_str, freq="M")
+        os_hoje = df_os[df_os["data_os"] == hoje]
+        os_mes = df_os[df_os["mes_os"] == mes_atual]
         os_aber = df_os[df_os["status"].str.upper().str.contains("ABERTO|ANDAMENTO|PENDENTE", na=False)]
         os_fin = os_mes[os_mes["status"].str.upper().str.contains("FINAL", na=False)]
 
@@ -299,23 +326,26 @@ with tab1:
         c3.metric("🔴 Em Aberto/Pendente", len(os_aber))
         c4.metric("✅ Finalizadas no Mês", len(os_fin))
 
-        # ── Visual: 5 OS do dia (fallback = mês) ──
+        # ── Visual: 5 OS mais recentes (hoje → junho → geral) ──
         st.markdown(
             f'<div class="sec">OS do dia — {hoje.strftime("%d/%m/%Y")}</div>',
             unsafe_allow_html=True,
         )
         if not os_hoje.empty:
-            os_cards(os_hoje.head(5))
-            st.caption(f"{len(os_hoje)} OS hoje — exibindo as 5 mais recentes")
+            df_vis = os_hoje.sort_values(["os_num", "dt"], ascending=False).head(5)
+            legenda = f"{len(os_hoje)} OS hoje — exibindo as 5 mais recentes"
+        elif not os_mes.empty:
+            df_vis = os_mes.sort_values(["os_num", "dt"], ascending=False).head(5)
+            legenda = f"Sem OS hoje — exibindo as 5 mais recentes de {mes_atual_str}"
         else:
-            meses_disp_tmp = sorted(df_os["mes_os"].dropna().unique(), reverse=True)
-            mes_ref = pd.Period(str(meses_disp_tmp[0]), freq="M") if meses_disp_tmp else pd.Period(mes_atual_str, freq="M")
-            df_fallback = df_os[df_os["mes_os"] == mes_ref].sort_values("dt", ascending=False)
-            if not df_fallback.empty:
-                os_cards(df_fallback.head(5))
-                st.caption(f"Sem OS hoje — exibindo as 5 mais recentes de {mes_ref}")
-            else:
-                st.info("Nenhuma OS registrada para hoje nem no último mês com dados.")
+            df_vis = df_os.sort_values(["os_num", "dt"], ascending=False).head(5)
+            legenda = "Sem OS no mês atual — exibindo as 5 OS mais recentes da base"
+
+        if df_vis.empty:
+            st.info("Nenhuma OS registrada.")
+        else:
+            os_cards(df_vis)
+            st.caption(legenda)
 
         st.divider()
 
@@ -323,7 +353,10 @@ with tab1:
         st.markdown('<div class="sec">OS do período</div>', unsafe_allow_html=True)
         meses_disp = sorted(df_os["mes_os"].dropna().unique(), reverse=True)
         meses_label = [str(m) for m in meses_disp]
-        idx_default = meses_label.index(mes_atual_str) if mes_atual_str in meses_label else 0
+        if mes_atual_str in meses_label:
+            idx_default = meses_label.index(mes_atual_str)
+        else:
+            idx_default = 0
         mes_sel_label = st.selectbox(
             "Selecionar mês:",
             options=meses_label,
@@ -331,7 +364,7 @@ with tab1:
             key="sel_mes_os",
         )
         mes_sel = pd.Period(mes_sel_label, freq="M")
-        df_mes_sel = df_os[df_os["mes_os"] == mes_sel].sort_values("dt", ascending=False)
+        df_mes_sel = df_os[df_os["mes_os"] == mes_sel].sort_values(["os_num", "dt"], ascending=False)
 
         st.caption(f"{len(df_mes_sel)} OS em {mes_sel_label}")
 
