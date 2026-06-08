@@ -135,12 +135,45 @@ from st_supabase_connection import SupabaseConnection
 conn = st.connection("supabase", type=SupabaseConnection, ttl=300)
 
 
-def sb(table):
-    try:
-        r = conn.client.table(table).select("*").execute()
-    except Exception:
-        r = conn.query("*", table=table).execute()
-    return pd.DataFrame(r.data)
+def sb(table, order_col=None, desc=True):
+    """Busca todos os registros (Supabase limita ~1000 por página)."""
+    all_data = []
+    page_size = 1000
+    offset = 0
+    while True:
+        try:
+            q = conn.client.table(table).select("*")
+            if order_col:
+                q = q.order(order_col, desc=desc)
+            r = q.range(offset, offset + page_size - 1).execute()
+        except Exception:
+            r = conn.query("*", table=table).execute()
+            return pd.DataFrame(r.data)
+        batch = r.data or []
+        all_data.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    return pd.DataFrame(all_data)
+
+
+def meses_disponiveis(series, mes_atual_str, n=6):
+    """Meses com dados + mês atual e anterior sempre visíveis."""
+    meses = sorted({str(m) for m in series.dropna().unique()}, reverse=True)
+    mes_atual = pd.Period(mes_atual_str, freq="M")
+    mes_ant = mes_atual - 1
+    for m in [str(mes_atual), str(mes_ant)]:
+        if m not in meses:
+            meses.insert(0, m)
+    return sorted(set(meses), reverse=True)[:n]
+
+
+def label_trator(row):
+    modelo = row.get("modelo")
+    frota = row.get("id_frota", "—")
+    if pd.notna(modelo) and str(modelo).strip():
+        return f"{modelo} · {frota}"
+    return str(frota)
 
 
 def parse_dt(series):
@@ -177,7 +210,7 @@ def melhor_data_os(df):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_os(_c):
-    df = sb("ordem_servico")
+    df = sb("ordem_servico", order_col="created_at", desc=True)
     if df.empty:
         return df
     df["dt"] = melhor_data_os(df)
@@ -212,7 +245,7 @@ def load_lub(_c):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_abast(_c):
-    df = sb("vw_abastecimento_consolidado")
+    df = sb("vw_abastecimento_consolidado", order_col="created_at", desc=True)
     if df.empty:
         return df
     df["dt"] = parse_dt(df["created_at"])
@@ -234,10 +267,12 @@ def load_transf(_c):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_disp(_c):
-    df = sb("vw_disponibilidade_equipamentos")
+    df = sb("vw_disponibilidade_equipamentos", order_col="mes", desc=True)
     if df.empty:
         return df
     df["mes"] = parse_dt(df["mes"])
+    # se mes vier como dia 1, normaliza para início do mês
+    df["mes"] = df["mes"].dt.to_period("M").dt.to_timestamp()
     for col in ["dias_com_apontamento", "horas_trabalhadas", "horas_parada", "disponibilidade_pct", "total_os"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
     return df
@@ -351,12 +386,8 @@ with tab1:
 
         # ── Filtro de mês + lista completa ──
         st.markdown('<div class="sec">OS do período</div>', unsafe_allow_html=True)
-        meses_disp = sorted(df_os["mes_os"].dropna().unique(), reverse=True)
-        meses_label = [str(m) for m in meses_disp]
-        if mes_atual_str in meses_label:
-            idx_default = meses_label.index(mes_atual_str)
-        else:
-            idx_default = 0
+        meses_label = meses_disponiveis(df_os["mes_os"], mes_atual_str, n=8)
+        idx_default = meses_label.index(mes_atual_str) if mes_atual_str in meses_label else 0
         mes_sel_label = st.selectbox(
             "Selecionar mês:",
             options=meses_label,
@@ -365,6 +396,12 @@ with tab1:
         )
         mes_sel = pd.Period(mes_sel_label, freq="M")
         df_mes_sel = df_os[df_os["mes_os"] == mes_sel].sort_values(["os_num", "dt"], ascending=False)
+
+        # fallback: se mês atual tem OS hoje mas mes_os falhou no parse
+        if df_mes_sel.empty and mes_sel_label == mes_atual_str and not os_hoje.empty:
+            df_mes_sel = os_hoje.sort_values(["os_num", "dt"], ascending=False)
+        elif df_mes_sel.empty and mes_sel_label == mes_atual_str and not os_mes.empty:
+            df_mes_sel = os_mes.sort_values(["os_num", "dt"], ascending=False)
 
         st.caption(f"{len(df_mes_sel)} OS em {mes_sel_label}")
 
@@ -404,26 +441,34 @@ with tab1:
 
             with col_r2:
                 st.markdown(
-                    f'<div class="sec">Equipamentos com mais OS — {mes_sel_label}</div>',
+                    f'<div class="sec">Mecânicos — produtividade · {mes_sel_label}</div>',
                     unsafe_allow_html=True,
                 )
                 r = (
-                    df_mes_sel.groupby("id_frota").size().reset_index(name="qtd")
-                    .sort_values("qtd", ascending=True).tail(8)
+                    df_mes_sel.groupby("mecanico")
+                    .agg(qtd=("numero_os", "count"), tempo_h=("tempo_min", lambda x: x.sum() / 60))
+                    .reset_index()
+                    .sort_values("qtd", ascending=True)
+                    .tail(8)
                 )
+                r["mecanico"] = r["mecanico"].fillna("Não informado")
                 fig = go.Figure(go.Bar(
-                    y=r["id_frota"], x=r["qtd"], orientation="h",
-                    marker_color="#6fcf60",
+                    y=r["mecanico"], x=r["qtd"], orientation="h",
+                    marker_color="#2980b9",
                     text=r["qtd"], textposition="outside",
                     textfont=dict(color="#e8edd0", size=13),
-                    hovertemplate="Frota %{y}<br>Quantidade de OS: %{x}<extra></extra>",
+                    customdata=r["tempo_h"].round(1),
+                    hovertemplate=(
+                        "Mecânico: %{y}<br>OS no período: %{x}<br>"
+                        "Tempo total: %{customdata:.1f}h<extra></extra>"
+                    ),
                 ))
                 fig.update_layout(
                     **PDARK, height=280,
-                    xaxis={**PLOT_AXIS},
+                    xaxis={**PLOT_AXIS, "title": "Quantidade de OS"},
                     yaxis={**PLOT_AXIS, "tickfont": dict(color="#e8edd0", size=12)},
                 )
-                st.plotly_chart(fig, use_container_width=True, key="k_frota")
+                st.plotly_chart(fig, use_container_width=True, key="k_mec")
 
             st.markdown(
                 f'<div class="sec">Corretiva × Preventiva — {mes_sel_label}</div>',
@@ -464,65 +509,32 @@ with tab2:
         l4.metric("📋 Total", len(df_lub))
 
         st.markdown(
-            '<div class="sec">Velocímetros — ordenados por urgência (3 por linha)</div>',
+            '<div class="sec">Prioridade de troca — top 10 mais urgentes</div>',
             unsafe_allow_html=True,
         )
-        dg = df_lub.sort_values("horas_restantes", ascending=True).head(9)
-        for i in range(0, len(dg), 3):
-            cols3 = st.columns(3)
-            for j, col in enumerate(cols3):
-                idx = i + j
-                if idx >= len(dg):
-                    break
-                row = dg.iloc[idx]
-                h_na = float(row["h_na_troca"]) if pd.notna(row["h_na_troca"]) else 0
-                h_prox = float(row["h_proxima_troca"]) if pd.notna(row["h_proxima_troca"]) else h_na + 250
-                h_at = float(row["h_atual"]) if pd.notna(row["h_atual"]) else h_na
-                h_rest = float(row["horas_restantes"]) if pd.notna(row["horas_restantes"]) else 0
-                st_ = str(row["status_troca"])
-                cor = "#c0392b" if st_ == "EM ATRASO" else "#d4a017" if st_ == "PROXIMO" else "#4a9e3f"
-                emin = max(0, h_na - 50)
-                emax = h_prox + max(100, abs(min(0, h_rest)) + 50)
-                fg = go.Figure(go.Indicator(
-                    mode="gauge+number+delta", value=h_at,
-                    number={"suffix": "h", "font": {"color": "#e8edd0", "size": 20}},
-                    delta={
-                        "reference": h_prox, "valueformat": ".0f",
-                        "increasing": {"color": "#c0392b"},
-                        "decreasing": {"color": "#4a9e3f"}, "suffix": "h",
-                    },
-                    title={
-                        "text": (
-                            f"<b>{row['vehicle']}</b><br>"
-                            f"<span style='font-size:10px;color:#8aab80'>"
-                            f"Troca: {fmt(h_na)}h → {fmt(h_prox)}h<br>"
-                            f"{'⚠ Atrasado' if h_rest < 0 else '✓ Restam'}: {fmt(abs(h_rest))}h</span>"
-                        ),
-                        "font": {"color": "#e8edd0", "size": 12},
-                    },
-                    gauge={
-                        "axis": {
-                            "range": [emin, emax],
-                            "tickcolor": "#4a6644",
-                            "tickfont": {"color": "#e8edd0", "size": 9},
-                        },
-                        "bar": {"color": cor, "thickness": 0.35},
-                        "bgcolor": "#0d180c", "bordercolor": "#1e2e1c",
-                        "steps": [
-                            {"range": [emin, h_prox - 100], "color": "#1a3318"},
-                            {"range": [h_prox - 100, h_prox], "color": "#2a2200"},
-                            {"range": [h_prox, emax], "color": "#2a1010"},
-                        ],
-                        "threshold": {"line": {"color": "#c0392b", "width": 3}, "thickness": 0.8, "value": h_prox},
-                    },
-                ))
-                fg.update_layout(
-                    paper_bgcolor="#111c10", plot_bgcolor="#111c10",
-                    font=dict(color="#e8edd0"),
-                    height=200, margin=dict(l=8, r=8, t=65, b=5),
-                )
-                with col:
-                    st.plotly_chart(fg, use_container_width=True, key=f"g_{row['vehicle']}_{idx}")
+        dg = df_lub.sort_values("horas_restantes", ascending=True).head(10).copy()
+        dg["label"] = dg["vehicle"].astype(str)
+        cores_lub = dg["status_troca"].map({
+            "EM ATRASO": "#c0392b", "PROXIMO": "#d4a017", "OK": "#4a9e3f",
+        }).fillna("#8aab80")
+        fig_lub = go.Figure(go.Bar(
+            y=dg["label"], x=dg["horas_restantes"], orientation="h",
+            marker_color=cores_lub.tolist(),
+            text=dg["horas_restantes"].apply(lambda v: f"{v:+.0f}h"),
+            textposition="outside",
+            textfont=dict(color="#e8edd0", size=12),
+            hovertemplate=(
+                "Frota: %{y}<br>Horas restantes: %{x:+.0f}h<extra></extra>"
+            ),
+        ))
+        fig_lub.add_vline(x=0, line_color="#8aab80", line_dash="dot", line_width=1)
+        fig_lub.update_layout(
+            **PDARK, height=max(280, len(dg) * 28),
+            xaxis={**PLOT_AXIS, "title": "Horas até a próxima troca (negativo = atrasado)"},
+            yaxis={**PLOT_AXIS, "tickfont": dict(color="#e8edd0", size=11)},
+        )
+        st.plotly_chart(fig_lub, use_container_width=True, key="k_lub_prio")
+        st.caption("🟢 OK · 🟡 Próximo · 🔴 Em atraso — abaixo, lista completa em tabela")
 
         st.markdown('<div class="sec">Lista completa — ordenada por urgência</div>', unsafe_allow_html=True)
 
@@ -638,30 +650,37 @@ with tab3:
             dark_table(dt2, height=180)
 
     st.markdown(
-        f'<div class="sec">Volume por frota — {mes_ini.strftime("%b/%Y")} (L)</div>',
+        f'<div class="sec">Volume diário abastecido — {mes_ini.strftime("%b/%Y")} (L)</div>',
         unsafe_allow_html=True,
     )
     if not df_abast.empty:
-        dm = df_abast[df_abast["data_os"] >= mes_ini]
-        if not dm.empty and "vehicle" in dm.columns:
-            pf = (
-                dm.groupby("vehicle")["liters"].sum()
-                .reset_index().sort_values("liters", ascending=True).tail(8)
-            )
+        dm = df_abast[df_abast["data_os"] >= mes_ini].copy()
+        if not dm.empty:
+            dm["dia"] = pd.to_datetime(dm["data_os"]).dt.strftime("%d/%m")
+            pd_dia = dm.groupby("dia")["liters"].sum().reset_index()
             fig = go.Figure(go.Bar(
-                y=pf["vehicle"], x=pf["liters"], orientation="h",
+                x=pd_dia["dia"], y=pd_dia["liters"],
                 marker_color="#4a9e3f",
-                text=pf["liters"].apply(lambda v: f"{v:,.0f}L"),
+                text=pd_dia["liters"].apply(lambda v: f"{v:,.0f}L"),
                 textposition="outside",
-                textfont=dict(color="#e8edd0", size=12),
-                hovertemplate="Frota %{y}<br>Volume: %{x:,.0f} L<extra></extra>",
+                textfont=dict(color="#e8edd0", size=11),
+                hovertemplate="Dia %{x}<br>Volume: %{y:,.0f} L<extra></extra>",
             ))
             fig.update_layout(
                 **PDARK, height=250,
-                xaxis={**PLOT_AXIS},
-                yaxis={**PLOT_AXIS, "tickfont": dict(color="#e8edd0", size=12)},
+                xaxis={**PLOT_AXIS, "title": "Dia do mês"},
+                yaxis={**PLOT_AXIS, "title": "Litros"},
             )
-            st.plotly_chart(fig, use_container_width=True, key="k_vol")
+            st.plotly_chart(fig, use_container_width=True, key="k_vol_dia")
+        elif "fuel_type" in df_abast.columns:
+            pf = df_abast.groupby("fuel_type")["liters"].sum().reset_index()
+            fig = go.Figure(go.Pie(
+                labels=pf["fuel_type"], values=pf["liters"],
+                textinfo="label+percent", textfont=dict(color="#e8edd0"),
+                marker=dict(colors=["#4a9e3f", "#2980b9", "#d4a017"]),
+            ))
+            fig.update_layout(**PDARK, height=250)
+            st.plotly_chart(fig, use_container_width=True, key="k_vol_tipo")
 
 # ══════════════════════════════════════════════════════════════
 # TAB 4 — PARADO × OPERANDO (somente tratores)
@@ -670,8 +689,9 @@ with tab4:
     if df_disp.empty:
         st.warning("Sem dados de disponibilidade.")
     else:
-        meses_d = sorted(df_disp["mes"].dt.to_period("M").unique(), reverse=True)
-        meses_d_label = [str(m) for m in meses_d]
+        meses_d_label = meses_disponiveis(
+            df_disp["mes"].dt.to_period("M"), mes_atual_str, n=6
+        )
         idx_d = meses_d_label.index(mes_atual_str) if mes_atual_str in meses_d_label else 0
         mes_d_sel = st.selectbox(
             "Mês de referência:",
@@ -682,6 +702,7 @@ with tab4:
         mp = pd.Period(mes_d_sel, freq="M")
         dmes_raw = df_disp[df_disp["mes"].dt.to_period("M") == mp].copy()
         dmes = filtrar_tratores(dmes_raw, df_frota)
+        dmes["label"] = dmes.apply(label_trator, axis=1)
         excluidos = len(dmes_raw) - len(dmes)
 
         if dmes.empty:
@@ -748,9 +769,6 @@ with tab4:
             st.plotly_chart(fg, use_container_width=True, key="k_disp_g")
 
             cd1, cd2 = st.columns(2)
-            modelo_map = {}
-            if "modelo" in dmes.columns:
-                modelo_map = dict(zip(dmes["id_frota"], dmes["modelo"]))
 
             with cd1:
                 st.markdown(
@@ -762,29 +780,19 @@ with tab4:
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
                     name="✅ Trabalhadas",
-                    y=dd["id_frota"], x=dd["horas_trabalhadas"],
+                    y=dd["label"], x=dd["horas_trabalhadas"],
                     orientation="h", marker_color="#4a9e3f",
                     text=dd["horas_trabalhadas"].apply(lambda v: f"{v:.0f}h"),
                     textposition="inside", textfont=dict(color="#e8edd0", size=11),
-                    hovertemplate=(
-                        "Frota %{y}<br>"
-                        + ("Modelo: %{customdata}<br>" if modelo_map else "")
-                        + "Horas trabalhadas: %{x:.0f}h<extra></extra>"
-                    ),
-                    customdata=dd["id_frota"].map(modelo_map) if modelo_map else None,
+                    hovertemplate="%{y}<br>Horas trabalhadas: %{x:.0f}h<extra></extra>",
                 ))
                 fig.add_trace(go.Bar(
                     name="🔴 Paradas",
-                    y=dd["id_frota"], x=dd["horas_parada"],
+                    y=dd["label"], x=dd["horas_parada"],
                     orientation="h", marker_color="#c0392b",
                     text=dd["horas_parada"].apply(lambda v: f"{v:.0f}h" if v > 0 else ""),
                     textposition="inside", textfont=dict(color="#e8edd0", size=11),
-                    hovertemplate=(
-                        "Frota %{y}<br>"
-                        + ("Modelo: %{customdata}<br>" if modelo_map else "")
-                        + "Horas paradas: %{x:.0f}h (manutenção / sem apontamento)<extra></extra>"
-                    ),
-                    customdata=dd["id_frota"].map(modelo_map) if modelo_map else None,
+                    hovertemplate="%{y}<br>Horas paradas: %{x:.0f}h<extra></extra>",
                 ))
                 fig.update_layout(
                     **PDARK, barmode="stack",
@@ -805,16 +813,12 @@ with tab4:
                 cores = dd2["disponibilidade_pct"].apply(
                     lambda v: "#c0392b" if v < 70 else "#d4a017" if v < 85 else "#4a9e3f")
                 fig = go.Figure(go.Bar(
-                    y=dd2["id_frota"], x=dd2["disponibilidade_pct"],
+                    y=dd2["label"], x=dd2["disponibilidade_pct"],
                     orientation="h", marker_color=cores.tolist(),
                     text=dd2["disponibilidade_pct"].apply(lambda v: f"{v:.1f}%"),
                     textposition="outside",
                     textfont=dict(color="#e8edd0", size=12),
-                    customdata=dd2["id_frota"].map(modelo_map) if modelo_map else dd2["id_frota"],
-                    hovertemplate=(
-                        "Frota %{y}<br>Modelo: %{customdata}<br>"
-                        "Disponibilidade: %{x:.1f}%<br>Meta: 85% · Crítico: 70%<extra></extra>"
-                    ),
+                    hovertemplate="%{y}<br>Disponibilidade: %{x:.1f}%<extra></extra>",
                 ))
                 fig.add_vline(
                     x=85, line_color="#4a9e3f", line_dash="dot", line_width=1,
