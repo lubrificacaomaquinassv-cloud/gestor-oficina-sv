@@ -339,6 +339,30 @@ def fmt(n, dec=0):
     return f"{n:,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def fmtR(n):
+    if pd.isna(n):
+        return "—"
+    return f"R$ {n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def colunas_custo(df):
+    """Detecta colunas de custo na tabela ordem_servico."""
+    if df.empty:
+        return {}
+    lower = {c.lower(): c for c in df.columns}
+    out = {}
+    for key, aliases in {
+        "pecas": ("custo_pecas", "valor_pecas", "custo_peca", "valor_peca", "pecas"),
+        "mo": ("custo_mo", "valor_mo", "custo_mao_obra", "valor_mao_obra", "mao_obra"),
+        "total": ("custo_total", "valor_total", "custo_os", "valor_os"),
+    }.items():
+        for a in aliases:
+            if a in lower:
+                out[key] = lower[a]
+                break
+    return out
+
+
 # ── HEADER ────────────────────────────────────────────────────
 h1, h2, h3 = st.columns([1, 8, 2])
 with h1:
@@ -449,16 +473,28 @@ with tab1:
 
         st.caption(f"{len(df_mes_sel)} OS em {mes_sel_label}")
 
-        if df_mes_sel.empty:
-            st.info(f"Nenhuma OS em {mes_sel_label}.")
-        else:
-            df_t = df_mes_sel[
-                ["numero_os", "id_frota", "sistema", "tipo_manutencao", "status", "mecanico", "dt_fmt"]
-            ].copy()
-            df_t.columns = ["OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora"]
-            dark_table(df_t, height=380)
-
         if not df_mes_sel.empty:
+            cc = colunas_custo(df_mes_sel)
+            v_pecas = pd.to_numeric(df_mes_sel[cc["pecas"]], errors="coerce").fillna(0).sum() if "pecas" in cc else None
+            v_mo = pd.to_numeric(df_mes_sel[cc["mo"]], errors="coerce").fillna(0).sum() if "mo" in cc else None
+            if "total" in cc:
+                v_total = pd.to_numeric(df_mes_sel[cc["total"]], errors="coerce").fillna(0).sum()
+            elif v_pecas is not None and v_mo is not None:
+                v_total = v_pecas + v_mo
+            else:
+                v_total = None
+
+            if v_total is not None or v_pecas is not None or v_mo is not None:
+                st.markdown(
+                    f'<div class="sec">Custos do período — {mes_sel_label}</div>',
+                    unsafe_allow_html=True,
+                )
+                kc1, kc2, kc3 = st.columns(3)
+                kc1.metric("🔩 Peças", fmtR(v_pecas) if v_pecas is not None else "—")
+                kc2.metric("🔧 Mão de Obra", fmtR(v_mo) if v_mo is not None else "—")
+                kc3.metric("💰 Total OS", fmtR(v_total) if v_total is not None else "—")
+                st.caption("Soma das OS do mês · peças compradas + MO registrada na OS")
+
             col_r1, col_r2 = st.columns(2)
             with col_r1:
                 st.markdown(
@@ -477,7 +513,7 @@ with tab1:
                     hovertemplate="%{y}<br>Quantidade de OS: %{x}<extra></extra>",
                 ))
                 fig.update_layout(
-                    **PDARK, height=280,
+                    **PDARK, height=260,
                     xaxis={**PLOT_AXIS},
                     yaxis={**PLOT_AXIS, "tickfont": dict(color="#e8edd0", size=12)},
                 )
@@ -508,32 +544,40 @@ with tab1:
                     ),
                 ))
                 fig.update_layout(
-                    **PDARK, height=280,
+                    **PDARK, height=260,
                     xaxis={**PLOT_AXIS, "title": "Quantidade de OS"},
                     yaxis={**PLOT_AXIS, "tickfont": dict(color="#e8edd0", size=12)},
                 )
                 st.plotly_chart(fig, use_container_width=True, key="k_mec")
 
+        if df_mes_sel.empty:
+            st.info(f"Nenhuma OS em {mes_sel_label}.")
+        else:
             st.markdown(
-                f'<div class="sec">Corretiva × Preventiva — {mes_sel_label}</div>',
+                f'<div class="sec">Lista de OS — {mes_sel_label}</div>',
                 unsafe_allow_html=True,
             )
-            r = df_mes_sel["tipo_manutencao"].str.upper().value_counts().reset_index()
-            r.columns = ["tipo", "qtd"]
-            cores = {"CORRETIVA": "#c0392b", "PREVENTIVA": "#4a9e3f"}
-            fig = go.Figure(go.Bar(
-                x=r["tipo"], y=r["qtd"],
-                marker_color=[cores.get(t, "#2980b9") for t in r["tipo"]],
-                text=r["qtd"], textposition="outside",
-                textfont=dict(color="#e8edd0", size=14),
-                hovertemplate="%{x}<br>Quantidade: %{y}<extra></extra>",
-            ))
-            fig.update_layout(
-                **PDARK, height=220,
-                xaxis={**PLOT_AXIS, "tickfont": dict(color="#e8edd0", size=13)},
-                yaxis={**PLOT_AXIS},
-            )
-            st.plotly_chart(fig, use_container_width=True, key="k_tipo")
+            cols_t = ["numero_os", "id_frota", "sistema", "tipo_manutencao", "status", "mecanico", "dt_fmt"]
+            cc = colunas_custo(df_mes_sel)
+            if "pecas" in cc:
+                cols_t.append(cc["pecas"])
+            if "mo" in cc:
+                cols_t.append(cc["mo"])
+            if "total" in cc:
+                cols_t.append(cc["total"])
+            df_t = df_mes_sel[cols_t].copy()
+            names = ["OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora"]
+            if "pecas" in cc:
+                names.append("Peças (R$)")
+            if "mo" in cc:
+                names.append("MO (R$)")
+            if "total" in cc:
+                names.append("Total (R$)")
+            df_t.columns = names
+            for col in ("Peças (R$)", "MO (R$)", "Total (R$)"):
+                if col in df_t.columns:
+                    df_t[col] = pd.to_numeric(df_t[col], errors="coerce").apply(fmtR)
+            dark_table(df_t, height=420)
 
 # ══════════════════════════════════════════════════════════════
 # TAB 2 — LUBRIFICAÇÃO + BORRACHARIA
@@ -553,40 +597,16 @@ with tab2:
         l4.metric("📋 Total", len(df_lub))
 
         st.markdown(
-            '<div class="sec">Prioridade de troca — top 10 mais urgentes</div>',
+            '<div class="sec">Equipamentos — ordem de urgência (top 15)</div>',
             unsafe_allow_html=True,
         )
-        dg = df_lub.sort_values("horas_restantes", ascending=True).head(10).copy()
-        dg["label"] = dg["vehicle"].astype(str)
-        cores_lub = dg["status_troca"].map({
-            "EM ATRASO": "#c0392b", "PROXIMO": "#d4a017", "OK": "#4a9e3f",
-        }).fillna("#8aab80")
-        fig_lub = go.Figure(go.Bar(
-            y=dg["label"], x=dg["horas_restantes"], orientation="h",
-            marker_color=cores_lub.tolist(),
-            text=dg["horas_restantes"].apply(lambda v: f"{v:+.0f}h"),
-            textposition="outside",
-            textfont=dict(color="#e8edd0", size=12),
-            hovertemplate=(
-                "Frota: %{y}<br>Horas restantes: %{x:+.0f}h<extra></extra>"
-            ),
-        ))
-        fig_lub.add_vline(x=0, line_color="#8aab80", line_dash="dot", line_width=1)
-        fig_lub.update_layout(
-            **PDARK, height=max(280, len(dg) * 28),
-            xaxis={**PLOT_AXIS, "title": "Horas até a próxima troca (negativo = atrasado)"},
-            yaxis={**PLOT_AXIS, "tickfont": dict(color="#e8edd0", size=11)},
-        )
-        st.plotly_chart(fig_lub, use_container_width=True, key="k_lub_prio")
-        st.caption("🟢 OK · 🟡 Próximo · 🔴 Em atraso — abaixo, lista completa em tabela")
-
-        st.markdown('<div class="sec">Lista completa — ordenada por urgência</div>', unsafe_allow_html=True)
+        st.caption("🟢 OK · 🟡 Próximo · 🔴 Em atraso — os mais urgentes aparecem primeiro")
 
         def badge(s):
             return {"OK": "🟢 OK", "PROXIMO": "🟡 PRÓXIMO", "EM ATRASO": "🔴 EM ATRASO"}.get(s, f"⚪ {s}")
 
         dt = (
-            df_lub.sort_values("horas_restantes", ascending=True)[
+            df_lub.sort_values("horas_restantes", ascending=True).head(15)[
                 ["vehicle", "h_na_troca", "h_proxima_troca", "h_atual", "horas_restantes", "status_troca"]
             ].copy()
         )
@@ -594,7 +614,7 @@ with tab2:
             lambda v: f"{v:+.0f}h" if pd.notna(v) else "—")
         dt["status_troca"] = dt["status_troca"].apply(badge)
         dt.columns = ["Frota", "H. Troca", "Próxima (h)", "H. Atual", "Restante", "Status"]
-        dark_table(dt, height=300)
+        dark_table(dt, height=520)
 
     st.divider()
     st.markdown('<div class="sec">Borracharia — OS recentes</div>', unsafe_allow_html=True)
