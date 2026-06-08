@@ -160,8 +160,15 @@ def sb(table, order_col=None, desc=True):
                 q = q.order(order_col, desc=desc)
             r = q.range(offset, offset + page_size - 1).execute()
         except Exception:
-            r = conn.query("*", table=table).execute()
-            return pd.DataFrame(r.data)
+            try:
+                r = (
+                    conn.client.table(table)
+                    .select("*")
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
+            except Exception:
+                return pd.DataFrame()
         batch = r.data or []
         all_data.extend(batch)
         if len(batch) < page_size:
@@ -365,7 +372,12 @@ def colunas_custo(df):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_financeiro(_c):
-    df = sb("financeiro_os", order_col="created_at", desc=True)
+    try:
+        df = sb("financeiro_os", order_col="created_at", desc=True)
+        if df.empty:
+            df = sb("financeiro_os")
+    except Exception:
+        return pd.DataFrame()
     if df.empty:
         return df
     df = df.copy()
