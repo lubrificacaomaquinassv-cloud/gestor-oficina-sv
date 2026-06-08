@@ -96,20 +96,37 @@ def os_cards(df_vis):
             )
 
 
+def label_trator(row):
+    frota = row.get("id_frota") or row.get("frota") or "—"
+    modelo = row.get("modelo")
+    if pd.notna(modelo) and str(modelo).strip():
+        return f"{modelo} · {frota}"
+    return str(frota)
+
+
 def filtrar_tratores(df, df_frota=None):
     """Disponibilidade de frota: somente tratores (exclui implementos)."""
     if df.empty:
         return df
     out = df.copy()
+    if "id_frota" not in out.columns and "frota" in out.columns:
+        out["id_frota"] = out["frota"]
+
+    for col in ("frota", "id_frota"):
+        if col in out.columns:
+            out = out[~out[col].astype(str).str.upper().str.contains(
+                r"IMPLEMENTO|IMPL\.|^IMP\b|REBOQUE|CARRETA", na=False, regex=True)]
 
     if df_frota is not None and not df_frota.empty and "id_frota" in out.columns:
-        frota_col = "id_frota" if "id_frota" in df_frota.columns else df_frota.columns[0]
+        frota_col = "id_frota" if "id_frota" in df_frota.columns else "frota"
+        if frota_col not in df_frota.columns:
+            frota_col = df_frota.columns[0]
         tipo_cols = [c for c in df_frota.columns if c.lower() in (
             "tipo", "categoria", "tipo_equipamento", "grupo", "classe", "familia")]
         if tipo_cols:
             tc = tipo_cols[0]
             fmap = df_frota.set_index(frota_col)[tc].astype(str).str.upper()
-            out["_tipo_frota"] = out["id_frota"].map(fmap).fillna("")
+            out["_tipo_frota"] = out["id_frota"].astype(str).map(fmap).fillna("")
             out = out[~out["_tipo_frota"].str.contains(
                 "IMPLEMENTO|REBOQUE|CARRETA|PLATAFORMA|SEM APONT", na=False, regex=True)]
             return out.drop(columns=["_tipo_frota"], errors="ignore")
@@ -123,10 +140,6 @@ def filtrar_tratores(df, df_frota=None):
     if "modelo" in out.columns:
         out = out[~out["modelo"].astype(str).str.upper().str.contains(
             "IMPLEMENTO|REBOQUE|CARRETA|PLATAFORMA", na=False, regex=True)]
-
-    if "id_frota" in out.columns:
-        out = out[~out["id_frota"].astype(str).str.upper().str.contains(
-            r"IMPLEMENTO|IMPL\.|^IMP\b", na=False, regex=True)]
 
     return out
 
@@ -157,25 +170,6 @@ def sb(table, order_col=None, desc=True):
     return pd.DataFrame(all_data)
 
 
-def meses_disponiveis(series, mes_atual_str, n=6):
-    """Meses com dados + mês atual e anterior sempre visíveis."""
-    meses = sorted({str(m) for m in series.dropna().unique()}, reverse=True)
-    mes_atual = pd.Period(mes_atual_str, freq="M")
-    mes_ant = mes_atual - 1
-    for m in [str(mes_atual), str(mes_ant)]:
-        if m not in meses:
-            meses.insert(0, m)
-    return sorted(set(meses), reverse=True)[:n]
-
-
-def label_trator(row):
-    modelo = row.get("modelo")
-    frota = row.get("id_frota", "—")
-    if pd.notna(modelo) and str(modelo).strip():
-        return f"{modelo} · {frota}"
-    return str(frota)
-
-
 def parse_dt(series):
     """Converte timestamps para horário de Brasília (naive)."""
     raw = series.astype(str).str.strip()
@@ -190,6 +184,68 @@ def parse_dt(series):
     if (~has_tz).any():
         dt.loc[~has_tz] = pd.to_datetime(raw[~has_tz], errors="coerce")
     return dt
+
+
+def parse_mes_key(series):
+    """Normaliza coluna de mês para string YYYY-MM."""
+    if series is None or len(series) == 0:
+        return pd.Series(dtype=str)
+    raw = series.astype(str).str.strip()
+    ym = raw.str.extract(r"(\d{4})[-/](\d{1,2})", expand=True)
+    out = pd.Series(index=series.index, dtype="object")
+    ok = ym[0].notna() & ym[1].notna()
+    out.loc[ok] = ym.loc[ok, 0] + "-" + ym.loc[ok, 1].str.zfill(2)
+    miss = ~ok
+    if miss.any():
+        dt = parse_dt(series[miss])
+        out.loc[miss] = dt.dt.strftime("%Y-%m")
+    return out
+
+
+def meses_disponiveis(series, mes_atual_str, n=6):
+    """Meses com dados + mês atual e anterior sempre visíveis."""
+    meses = sorted({str(m) for m in series.dropna().unique() if str(m) not in ("", "NaT", "None")}, reverse=True)
+    mes_atual = pd.Period(mes_atual_str, freq="M")
+    mes_ant = mes_atual - 1
+    for m in [str(mes_atual), str(mes_ant)]:
+        if m not in meses:
+            meses.insert(0, m)
+    return sorted(set(meses), reverse=True)[:n]
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_disp(_c):
+    df = sb("vw_disponibilidade_equipamentos", order_col="mes", desc=True)
+    if df.empty:
+        return df
+    col_mes = next((c for c in ("mes", "mes_referencia", "competencia", "periodo") if c in df.columns), "mes")
+    df["mes_key"] = parse_mes_key(df[col_mes])
+    df["mes"] = pd.to_datetime(df["mes_key"] + "-01", errors="coerce")
+    for col in ["dias_com_apontamento", "horas_trabalhadas", "horas_parada", "disponibilidade_pct", "total_os"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return df
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_horas_frota(_c, mes_atual_str):
+    """View ao vivo do mês corrente (usada pelo painel de frota)."""
+    df = sb("vw_horas_frota", order_col="disponibilidade_pct", desc=False)
+    if df.empty:
+        return df
+    if "frota" in df.columns and "id_frota" not in df.columns:
+        df["id_frota"] = df["frota"]
+    if "modelo" not in df.columns and "frota" in df.columns:
+        df["modelo"] = df["frota"]
+    df["mes_key"] = mes_atual_str
+    df["mes"] = pd.to_datetime(mes_atual_str + "-01", errors="coerce")
+    if "dias_com_apontamento" not in df.columns:
+        df["dias_com_apontamento"] = 0
+    for col in ["dias_com_apontamento", "horas_trabalhadas", "horas_parada", "disponibilidade_pct", "total_os"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        else:
+            df[col] = 0
+    return df
 
 
 def os_numero(series):
@@ -266,19 +322,6 @@ def load_transf(_c):
 
 
 @st.cache_data(ttl=120, show_spinner=False)
-def load_disp(_c):
-    df = sb("vw_disponibilidade_equipamentos", order_col="mes", desc=True)
-    if df.empty:
-        return df
-    df["mes"] = parse_dt(df["mes"])
-    # se mes vier como dia 1, normaliza para início do mês
-    df["mes"] = df["mes"].dt.to_period("M").dt.to_timestamp()
-    for col in ["dias_com_apontamento", "horas_trabalhadas", "horas_parada", "disponibilidade_pct", "total_os"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    return df
-
-
-@st.cache_data(ttl=120, show_spinner=False)
 def load_frota(_c):
     for table in ("frota", "cadastro_frota", "equipamentos", "vw_frota"):
         try:
@@ -323,17 +366,18 @@ with h3:
 
 st.divider()
 
+hoje = (datetime.utcnow() - timedelta(hours=3)).date()
+mes_ini = hoje.replace(day=1)
+mes_atual_str = pd.Period(hoje, freq="M").strftime("%Y-%m")
+
 df_os = load_os(conn)
 df_bor = load_bor(conn)
 df_lub = load_lub(conn)
 df_abast = load_abast(conn)
 df_transf = load_transf(conn)
 df_disp = load_disp(conn)
+df_horas = load_horas_frota(conn, mes_atual_str)
 df_frota = load_frota(conn)
-
-hoje = (datetime.utcnow() - timedelta(hours=3)).date()
-mes_ini = hoje.replace(day=1)
-mes_atual_str = pd.Period(hoje, freq="M").strftime("%Y-%m")
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "🔧 Ordens de Serviço",
@@ -686,12 +730,19 @@ with tab3:
 # TAB 4 — PARADO × OPERANDO (somente tratores)
 # ══════════════════════════════════════════════════════════════
 with tab4:
-    if df_disp.empty:
+    if df_disp.empty and df_horas.empty:
         st.warning("Sem dados de disponibilidade.")
     else:
-        meses_d_label = meses_disponiveis(
-            df_disp["mes"].dt.to_period("M"), mes_atual_str, n=6
+        meses_hist = (
+            meses_disponiveis(df_disp["mes_key"], mes_atual_str, n=6)
+            if not df_disp.empty else []
         )
+        meses_d_label = list(meses_hist)
+        if not df_horas.empty and mes_atual_str not in meses_d_label:
+            meses_d_label.insert(0, mes_atual_str)
+        if not meses_d_label:
+            meses_d_label = [mes_atual_str]
+
         idx_d = meses_d_label.index(mes_atual_str) if mes_atual_str in meses_d_label else 0
         mes_d_sel = st.selectbox(
             "Mês de referência:",
@@ -699,16 +750,35 @@ with tab4:
             index=idx_d,
             key="sel_mes_disp",
         )
-        mp = pd.Period(mes_d_sel, freq="M")
-        dmes_raw = df_disp[df_disp["mes"].dt.to_period("M") == mp].copy()
+
+        # Junho (mês atual) → view ao vivo vw_horas_frota | demais → histórico
+        if mes_d_sel == mes_atual_str and not df_horas.empty:
+            dmes_raw = df_horas.copy()
+            fonte = "vw_horas_frota (mês corrente)"
+        elif not df_disp.empty:
+            dmes_raw = df_disp[df_disp["mes_key"] == mes_d_sel].copy()
+            fonte = "vw_disponibilidade_equipamentos"
+        else:
+            dmes_raw = pd.DataFrame()
+            fonte = ""
+
         dmes = filtrar_tratores(dmes_raw, df_frota)
-        dmes["label"] = dmes.apply(label_trator, axis=1)
+        if not dmes.empty:
+            dmes["label"] = dmes.apply(label_trator, axis=1)
         excluidos = len(dmes_raw) - len(dmes)
 
         if dmes.empty:
-            st.info(f"Sem dados de tratores para {mes_d_sel}.")
+            if not dmes_raw.empty:
+                st.warning(
+                    f"Encontrados {len(dmes_raw)} registros em {mes_d_sel}, "
+                    "mas nenhum trator após excluir implementos."
+                )
+            else:
+                st.info(f"Sem dados de tratores para {mes_d_sel}.")
         else:
             mlabel = mes_d_sel
+            if mes_d_sel == mes_atual_str:
+                st.caption(f"Fonte: {fonte} · dados atualizados em tempo real")
             dm = dmes["disponibilidade_pct"].mean()
             ht = dmes["horas_trabalhadas"].sum()
             hp = dmes["horas_parada"].sum()
