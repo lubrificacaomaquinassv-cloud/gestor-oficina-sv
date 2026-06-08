@@ -363,6 +363,55 @@ def colunas_custo(df):
     return out
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def load_financeiro(_c):
+    df = sb("financeiro_os", order_col="created_at", desc=True)
+    if df.empty:
+        return df
+    df = df.copy()
+    if "valor_unitario" in df.columns and "quantidade" in df.columns:
+        df["v_peca"] = (
+            pd.to_numeric(df["valor_unitario"], errors="coerce").fillna(0)
+            * pd.to_numeric(df["quantidade"], errors="coerce").fillna(1)
+        )
+    elif "valor_total" in df.columns:
+        df["v_peca"] = pd.to_numeric(df["valor_total"], errors="coerce").fillna(0)
+    else:
+        df["v_peca"] = 0
+    df["custo_mo"] = pd.to_numeric(
+        df["custo_mo"] if "custo_mo" in df.columns else 0, errors="coerce"
+    ).fillna(0)
+    if "custo_total_os" in df.columns:
+        df["total_os"] = pd.to_numeric(df["custo_total_os"], errors="coerce").fillna(0)
+    if "created_at" in df.columns:
+        df["mes_key"] = parse_mes_key(parse_dt(df["created_at"]))
+    elif "mes" in df.columns:
+        df["mes_key"] = parse_mes_key(df["mes"])
+    mod_col = next((c for c in ("modulo", "tipo_modulo", "origem") if c in df.columns), None)
+    if mod_col:
+        df["modulo"] = df[mod_col].astype(str).str.upper()
+    return df
+
+
+def resumo_financeiro_os(df_fin):
+    """Agrega financeiro_os por OS (várias linhas = várias peças)."""
+    if df_fin.empty or "numero_os" not in df_fin.columns:
+        return pd.DataFrame()
+    g = df_fin.groupby("numero_os")
+    res = g["v_peca"].sum().rename("pecas").to_frame().join(
+        g["custo_mo"].max().rename("custo_mo")
+    ).reset_index()
+    if "id_frota" in df_fin.columns:
+        res = res.merge(g["id_frota"].first().reset_index(), on="numero_os", how="left")
+    if "total_os" in df_fin.columns:
+        res = res.merge(g["total_os"].max().rename("total_os").reset_index(), on="numero_os", how="left")
+        res["total"] = res["total_os"].fillna(res["pecas"] + res["custo_mo"])
+        res = res.drop(columns=["total_os"])
+    else:
+        res["total"] = res["pecas"] + res["custo_mo"]
+    return res
+
+
 # ── HEADER ────────────────────────────────────────────────────
 h1, h2, h3 = st.columns([1, 8, 2])
 with h1:
@@ -402,6 +451,7 @@ df_transf = load_transf(conn)
 df_disp = load_disp(conn)
 df_horas = load_horas_frota(conn, mes_atual_str)
 df_frota = load_frota(conn)
+df_fin = load_financeiro(conn)
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "🔧 Ordens de Serviço",
@@ -474,26 +524,22 @@ with tab1:
         st.caption(f"{len(df_mes_sel)} OS em {mes_sel_label}")
 
         if not df_mes_sel.empty:
-            cc = colunas_custo(df_mes_sel)
-            v_pecas = pd.to_numeric(df_mes_sel[cc["pecas"]], errors="coerce").fillna(0).sum() if "pecas" in cc else None
-            v_mo = pd.to_numeric(df_mes_sel[cc["mo"]], errors="coerce").fillna(0).sum() if "mo" in cc else None
-            if "total" in cc:
-                v_total = pd.to_numeric(df_mes_sel[cc["total"]], errors="coerce").fillna(0).sum()
-            elif v_pecas is not None and v_mo is not None:
-                v_total = v_pecas + v_mo
-            else:
-                v_total = None
+            fin_mes = df_fin[df_fin["mes_key"] == mes_sel_label] if not df_fin.empty and "mes_key" in df_fin.columns else pd.DataFrame()
+            res_fin = resumo_financeiro_os(fin_mes)
 
-            if v_total is not None or v_pecas is not None or v_mo is not None:
+            if not res_fin.empty:
                 st.markdown(
-                    f'<div class="sec">Custos do período — {mes_sel_label}</div>',
+                    f'<div class="sec">Custos do período — {mes_sel_label} · financeiro_os</div>',
                     unsafe_allow_html=True,
                 )
-                kc1, kc2, kc3 = st.columns(3)
-                kc1.metric("🔩 Peças", fmtR(v_pecas) if v_pecas is not None else "—")
-                kc2.metric("🔧 Mão de Obra", fmtR(v_mo) if v_mo is not None else "—")
-                kc3.metric("💰 Total OS", fmtR(v_total) if v_total is not None else "—")
-                st.caption("Soma das OS do mês · peças compradas + MO registrada na OS")
+                kc1, kc2, kc3, kc4 = st.columns(4)
+                kc1.metric("🔩 Peças", fmtR(res_fin["pecas"].sum()))
+                kc2.metric("🔧 Mão de Obra", fmtR(res_fin["custo_mo"].sum()))
+                kc3.metric("💰 Total OS", fmtR(res_fin["total"].sum()))
+                kc4.metric("📋 OS c/ lançamento", len(res_fin))
+                os_so_mo = len(res_fin[res_fin["pecas"] == 0])
+                if os_so_mo:
+                    st.caption(f"{os_so_mo} OS somente com MO (sem peça aplicada)")
 
             col_r1, col_r2 = st.columns(2)
             with col_r1:
@@ -558,25 +604,19 @@ with tab1:
                 unsafe_allow_html=True,
             )
             cols_t = ["numero_os", "id_frota", "sistema", "tipo_manutencao", "status", "mecanico", "dt_fmt"]
-            cc = colunas_custo(df_mes_sel)
-            if "pecas" in cc:
-                cols_t.append(cc["pecas"])
-            if "mo" in cc:
-                cols_t.append(cc["mo"])
-            if "total" in cc:
-                cols_t.append(cc["total"])
             df_t = df_mes_sel[cols_t].copy()
-            names = ["OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora"]
-            if "pecas" in cc:
-                names.append("Peças (R$)")
-            if "mo" in cc:
-                names.append("MO (R$)")
-            if "total" in cc:
-                names.append("Total (R$)")
+            if not res_fin.empty:
+                df_t = df_t.merge(
+                    res_fin[["numero_os", "pecas", "custo_mo", "total"]],
+                    on="numero_os", how="left",
+                )
+                df_t["pecas"] = df_t["pecas"].fillna(0).apply(fmtR)
+                df_t["custo_mo"] = df_t["custo_mo"].fillna(0).apply(fmtR)
+                df_t["total"] = df_t["total"].fillna(0).apply(fmtR)
+                names = ["OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora", "Peças", "MO", "Total"]
+            else:
+                names = ["OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora"]
             df_t.columns = names
-            for col in ("Peças (R$)", "MO (R$)", "Total (R$)"):
-                if col in df_t.columns:
-                    df_t[col] = pd.to_numeric(df_t[col], errors="coerce").apply(fmtR)
             dark_table(df_t, height=420)
 
 # ══════════════════════════════════════════════════════════════
