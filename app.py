@@ -296,13 +296,98 @@ def load_bor(_c):
     return df
 
 
+def status_lub(hr):
+    if pd.isna(hr):
+        return "—"
+    if hr < 0:
+        return "EM ATRASO"
+    if hr <= 100:
+        return "PROXIMO"
+    return "OK"
+
+
 @st.cache_data(ttl=120, show_spinner=False)
-def load_lub(_c):
+def load_lub_v4(_c):
     df = sb("vw_proxima_troca_v4")
     if df.empty:
         return df
     for col in ["horas_restantes", "h_atual", "h_proxima_troca", "h_na_troca"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "horas_restantes" not in df.columns and {"h_proxima_troca", "h_atual"}.issubset(df.columns):
+        df["horas_restantes"] = df["h_proxima_troca"] - df["h_atual"]
+    if "status_troca" not in df.columns and "horas_restantes" in df.columns:
+        df["status_troca"] = df["horas_restantes"].apply(status_lub)
+    df["_fonte"] = "vw_proxima_troca_v4"
+    return df
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_lub_gestor(_c):
+    """Painel lub: prioriza lubrificacao_v3 + ultima_troca_lubri (import Excel / app novo)."""
+    df_v3 = sb("lubrificacao_v3", order_col="data_servico", desc=True)
+    if df_v3.empty:
+        return load_lub_v4(_c)
+
+    df = (
+        df_v3.sort_values("data_servico", ascending=False)
+        .drop_duplicates(subset=["vehicle"], keep="first")
+        .copy()
+    )
+    df["vehicle"] = df["vehicle"].astype(str).str.strip()
+    df["h_atual"] = pd.to_numeric(df["hourmeter_atual"], errors="coerce")
+    df["h_proxima_troca"] = pd.to_numeric(df["hourmeter_prox"], errors="coerce")
+
+    df_ult = sb("ultima_troca_lubri")
+    if not df_ult.empty:
+        df_ult = df_ult.copy()
+        df_ult["frota"] = df_ult["frota"].astype(str).str.strip()
+        df = df.merge(
+            df_ult[["frota", "horimetro_ultima_troca"]],
+            left_on="vehicle",
+            right_on="frota",
+            how="left",
+        )
+        df["h_na_troca"] = pd.to_numeric(df["horimetro_ultima_troca"], errors="coerce")
+    else:
+        df["h_na_troca"] = pd.NA
+
+    df_equip = sb("dim_equipamento_lubri")
+    if not df_equip.empty:
+        df_equip = df_equip.copy()
+        df_equip["frota"] = df_equip["frota"].astype(str).str.strip()
+        df = df.merge(
+            df_equip[["frota", "modelo", "intervalo_horas"]],
+            left_on="vehicle",
+            right_on="frota",
+            how="left",
+            suffixes=("", "_eq"),
+        )
+
+    miss = df["h_na_troca"].isna() & df["observation"].notna()
+    if miss.any():
+        ext = df.loc[miss, "observation"].astype(str).str.extract(r"trocado\s+(\d+)", expand=False)
+        df.loc[miss, "h_na_troca"] = pd.to_numeric(ext, errors="coerce")
+
+    df["horas_restantes"] = df["h_proxima_troca"] - df["h_atual"]
+    df["status_troca"] = df["horas_restantes"].apply(status_lub)
+    df["_fonte"] = "lubrificacao_v3"
+    return df
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_lub(_c):
+    return load_lub_gestor(_c)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_fin_lub(_c):
+    df = sb("financeiro_lubrificacao", order_col="criado_em", desc=True)
+    if df.empty:
+        return df
+    df["custo_total"] = pd.to_numeric(df["custo_total"], errors="coerce").fillna(0)
+    if "criado_em" in df.columns:
+        df["mes_key"] = parse_mes_key(parse_dt(df["criado_em"]))
     return df
 
 
@@ -480,6 +565,7 @@ mes_atual_str = pd.Period(hoje, freq="M").strftime("%Y-%m")
 df_os = load_os(conn)
 df_bor = load_bor(conn)
 df_lub = load_lub(conn)
+df_fin_lub = load_fin_lub(conn)
 df_abast = load_abast(conn)
 df_transf = load_transf(conn)
 df_disp = load_disp(conn)
@@ -661,6 +747,9 @@ with tab2:
     if df_lub.empty:
         st.info("Sem dados de lubrificação.")
     else:
+        fonte = df_lub["_fonte"].iloc[0] if "_fonte" in df_lub.columns else "—"
+        st.caption(f"Fonte: {fonte} · {len(df_lub)} equipamentos")
+
         ok = (df_lub["status_troca"] == "OK").sum()
         prx = (df_lub["status_troca"] == "PROXIMO").sum()
         atr = (df_lub["status_troca"] == "EM ATRASO").sum()
@@ -669,6 +758,19 @@ with tab2:
         l2.metric("⚠️ Próximo ≤100h", prx)
         l3.metric("🔴 Em Atraso", atr)
         l4.metric("📋 Total", len(df_lub))
+
+        if not df_fin_lub.empty and "mes_key" in df_fin_lub.columns:
+            fin_mes_lub = df_fin_lub[df_fin_lub["mes_key"] == mes_atual_str]
+            if not fin_mes_lub.empty:
+                st.markdown(
+                    f'<div class="sec">Custos lubrificação — {mes_atual_str} · financeiro_lubrificacao</div>',
+                    unsafe_allow_html=True,
+                )
+                fc1, fc2, fc3 = st.columns(3)
+                fc1.metric("💰 Total mês", fmtR(fin_mes_lub["custo_total"].sum()))
+                fc2.metric("📋 Lançamentos", len(fin_mes_lub))
+                fc3.metric("🛢 Frotas", fin_mes_lub["id_frota"].nunique())
+                st.caption("Atualize preços em preco_insumo / dim_insumo para custos automáticos no app novo.")
 
         st.markdown(
             '<div class="sec">Equipamentos — ordem de urgência (top 15)</div>',
@@ -679,15 +781,26 @@ with tab2:
         def badge(s):
             return {"OK": "🟢 OK", "PROXIMO": "🟡 PRÓXIMO", "EM ATRASO": "🔴 EM ATRASO"}.get(s, f"⚪ {s}")
 
-        dt = (
-            df_lub.sort_values("horas_restantes", ascending=True).head(15)[
-                ["vehicle", "h_na_troca", "h_proxima_troca", "h_atual", "horas_restantes", "status_troca"]
-            ].copy()
-        )
+        col_frota = "vehicle" if "vehicle" in df_lub.columns else "frota"
+        cols_show = [col_frota, "h_na_troca", "h_proxima_troca", "h_atual", "horas_restantes", "status_troca"]
+        cols_show = [c for c in cols_show if c in df_lub.columns]
+
+        dt = df_lub.sort_values("horas_restantes", ascending=True).head(15)[cols_show].copy()
+        dt["h_na_troca"] = dt["h_na_troca"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
+        dt["h_proxima_troca"] = dt["h_proxima_troca"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
+        dt["h_atual"] = dt["h_atual"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
         dt["horas_restantes"] = dt["horas_restantes"].apply(
             lambda v: f"{v:+.0f}h" if pd.notna(v) else "—")
         dt["status_troca"] = dt["status_troca"].apply(badge)
-        dt.columns = ["Frota", "H. Troca", "Próxima (h)", "H. Atual", "Restante", "Status"]
+        rename = {
+            col_frota: "Frota",
+            "h_na_troca": "H. Troca",
+            "h_proxima_troca": "Próxima (h)",
+            "h_atual": "H. Atual",
+            "horas_restantes": "Restante",
+            "status_troca": "Status",
+        }
+        dt = dt.rename(columns=rename)
         dark_table(dt, height=520)
 
     st.divider()
