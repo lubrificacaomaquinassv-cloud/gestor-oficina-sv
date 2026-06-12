@@ -412,6 +412,24 @@ def load_fin_lanc(_c):
     return df
 
 
+def sem_acento(s):
+    """Normaliza nomes para comparação: sem acento, maiúsculo, sem espaços nas pontas."""
+    return (s.astype(str).str.normalize("NFKD").str.encode("ascii", "ignore")
+            .str.decode("ascii").str.strip().str.upper())
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_apont(_c):
+    """apontamento_campo: quem operou cada frota em cada data."""
+    df = sb("apontamento_campo")
+    if df.empty:
+        return df
+    df = df.copy()
+    df["data"] = pd.to_datetime(df["data"], errors="coerce").dt.date
+    df["frota"] = df["frota"].astype(str).str.strip()
+    df["operador"] = sem_acento(df["operador"])
+    return df.dropna(subset=["data"]).sort_values("data")
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_colab(_c):
     """dim_colaborador: custo_hora por nome (mecânicos e operadores)."""
@@ -419,7 +437,7 @@ def load_colab(_c):
     if df.empty:
         return df
     df = df.copy()
-    df["_nome"] = df["nome"].astype(str).str.strip().str.upper()
+    df["_nome"] = sem_acento(df["nome"])
     df["custo_hora"] = pd.to_numeric(df["custo_hora"], errors="coerce").fillna(0)
     return df[df["custo_hora"] > 0].drop_duplicates(subset=["_nome"], keep="first")
 
@@ -616,6 +634,7 @@ df_fin = load_financeiro(conn)
 df_fin_lanc = load_fin_lanc(conn)
 df_colab = load_colab(conn)
 df_oper = load_operadores(conn)
+df_apont = load_apont(conn)
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔧 Ordens de Serviço",
@@ -1272,18 +1291,29 @@ with tab5:
                 _ch = df_colab.set_index("_nome")["custo_hora"]
                 _dfp = df_os_fin.copy()
                 _dfp["_h"] = pd.to_numeric(_dfp["tempo_min"], errors="coerce").fillna(0) / 60.0
-                _dfp["_mec"] = _dfp["mecanico"].astype(str).str.strip().str.upper()
+                _dfp["_mec"] = sem_acento(_dfp["mecanico"])
                 _dfp["_c_mec"] = _dfp["_h"] * _dfp["_mec"].map(_ch).fillna(0)
                 # Operador: o apontado na OS; se vazio, o vinculado à frota
                 _dfp["_oper"] = ""
                 if "operador" in _dfp.columns:
                     _dfp["_oper"] = (_dfp["operador"].astype(str).str.strip().str.upper()
                                      .replace({"NONE": "", "NAN": ""}))
+                # 2ª fonte: apontamento de campo (operador na frota até a data da OS)
+                if not df_apont.empty and _dfp["_oper"].eq("").any():
+                    for _i in _dfp.index[_dfp["_oper"].eq("")]:
+                        _cand = df_apont[df_apont["frota"] == str(_dfp.at[_i, "id_frota"]).strip()]
+                        if _cand.empty:
+                            continue
+                        _d = _dfp.at[_i, "data_os"]
+                        _ate = _cand[_cand["data"] <= _d] if pd.notna(_d) else _cand
+                        _dfp.at[_i, "_oper"] = (_ate.iloc[-1]["operador"] if not _ate.empty
+                                                else _cand.iloc[0]["operador"])
                 if not df_oper.empty:
                     _fmap = df_oper.set_index("id_frota")["operador"]
                     _falta = _dfp["_oper"].eq("")
                     _dfp.loc[_falta, "_oper"] = (_dfp.loc[_falta, "id_frota"].astype(str)
                                                  .str.strip().map(_fmap).fillna(""))
+                _dfp["_oper"] = sem_acento(_dfp["_oper"])
                 _dfp["_c_op"] = _dfp["_h"] * _dfp["_oper"].map(_ch).fillna(0)
                 _dfp["_c_tot"] = _dfp["_c_mec"] + _dfp["_c_op"]
 
@@ -1296,7 +1326,8 @@ with tab5:
                           help="Tempo da OS × custo_hora do operador parado (dim_colaborador)")
                 p4.metric("💸 Custo Total da Parada", fmtR(_dfp["_c_tot"].sum()))
                 st.caption("Cálculo: tempo da OS × custo_hora da dim_colaborador. "
-                           "Operador: o apontado na OS ou, se vazio, o vinculado à frota (dim_operador_frota).")
+                           "Operador: 1º o apontado na OS; 2º o apontamento de campo da frota "
+                           "até a data da OS (apontamento_campo); 3º o vínculo fixo (dim_operador_frota).")
 
                 _tp = _dfp[_dfp["_h"] > 0].sort_values("_c_tot", ascending=False).head(30)
                 if _tp.empty:
