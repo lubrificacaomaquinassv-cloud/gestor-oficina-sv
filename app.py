@@ -158,7 +158,9 @@ def mapa_categoria_frota(df_frota):
         "categoria", "tipo", "tipo_equipamento", "grupo", "classe", "familia")), None)
     if not cat:
         return {}
-    return df_frota.set_index(col)[cat].astype(str).str.strip().str.upper().to_dict()
+    tmp = df_frota[[col, cat]].copy()
+    tmp[col] = tmp[col].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    return tmp.set_index(col)[cat].astype(str).str.strip().str.upper().to_dict()
 
 
 def eh_implemento(categoria):
@@ -1326,11 +1328,9 @@ with tab5:
                 _dfp["_c_mec"] = _dfp["_h"] * _dfp["_mec"].map(busca_ch)
                 # Implemento acoplado: sem custo de operador (operador no trator)
                 _cat_map = mapa_categoria_frota(df_frota)
-                _dfp["_impl"] = _dfp["id_frota"].astype(str).str.strip().map(
+                _dfp["_impl"] = _dfp["id_frota"].astype(str).str.strip().str.replace(
+                    r"\.0$", "", regex=True).map(
                     lambda f: eh_implemento(_cat_map.get(f, "")))
-                if "sistema" in _dfp.columns:
-                    _dfp["_impl"] = _dfp["_impl"] | _dfp["sistema"].astype(str).str.upper().str.contains(
-                        "IMPLEMENTO", na=False)
                 # Operador: o apontado na OS; se vazio, apontamento de campo (só tratores)
                 _dfp["_oper"] = ""
                 if "operador" in _dfp.columns:
