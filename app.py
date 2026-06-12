@@ -414,8 +414,13 @@ def load_fin_lanc(_c):
 
 def sem_acento(s):
     """Normaliza nomes para comparação: sem acento, maiúsculo, sem espaços nas pontas."""
-    return (s.astype(str).str.normalize("NFKD").str.encode("ascii", "ignore")
-            .str.decode("ascii").str.strip().str.upper())
+    import unicodedata
+    def _norm(x):
+        x = "" if x is None else str(x)
+        x = unicodedata.normalize("NFKD", x)
+        x = x.encode("ascii", "ignore").decode("ascii")
+        return x.strip().upper()
+    return s.map(_norm)
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_apont(_c):
