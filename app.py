@@ -412,6 +412,31 @@ def load_fin_lanc(_c):
     return df
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_colab(_c):
+    """dim_colaborador: custo_hora por nome (mecânicos e operadores)."""
+    df = sb("dim_colaborador")
+    if df.empty:
+        return df
+    df = df.copy()
+    df["_nome"] = df["nome"].astype(str).str.strip().str.upper()
+    df["custo_hora"] = pd.to_numeric(df["custo_hora"], errors="coerce").fillna(0)
+    return df[df["custo_hora"] > 0].drop_duplicates(subset=["_nome"], keep="first")
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_operadores(_c):
+    """dim_operador_frota: vínculo frota ↔ operador (sem valor)."""
+    df = sb("dim_operador_frota")
+    if df.empty:
+        return df
+    df = df.copy()
+    if "ativo" in df.columns:
+        df = df[df["ativo"].astype(str).str.upper().isin(["TRUE", "1", "SIM", "S"])]
+    df["id_frota"] = df["id_frota"].astype(str).str.strip()
+    df["operador"] = df["operador"].astype(str).str.strip().str.upper()
+    return df.drop_duplicates(subset=["id_frota"], keep="first")
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def load_abast(_c):
     df = sb("vw_abastecimento_consolidado", order_col="created_at", desc=True)
@@ -589,6 +614,8 @@ df_horas = load_horas_frota(conn, mes_atual_str)
 df_frota = load_frota(conn)
 df_fin = load_financeiro(conn)
 df_fin_lanc = load_fin_lanc(conn)
+df_colab = load_colab(conn)
+df_oper = load_operadores(conn)
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔧 Ordens de Serviço",
@@ -1235,24 +1262,57 @@ with tab5:
                     )
                     st.plotly_chart(fig, use_container_width=True, key="k_fin_frota")
 
-            st.markdown('<div class="sec">Evolução mensal — últimos 6 meses</div>', unsafe_allow_html=True)
-            ev = (
-                df_fin_lanc.groupby("mes_key")["valor"].sum().reset_index()
-                .sort_values("mes_key").tail(6)
-            )
-            fig = go.Figure(go.Bar(
-                x=ev["mes_key"], y=ev["valor"],
-                marker_color="#d4a017",
-                text=ev["valor"].apply(fmtR), textposition="outside",
-                textfont=dict(color="#e8edd0", size=11),
-                hovertemplate="%{x}<br>R$ %{y:,.2f}<extra></extra>",
-            ))
-            fig.update_layout(
-                **PDARK, height=250,
-                xaxis={**PLOT_AXIS, "title": "Mês"},
-                yaxis={**PLOT_AXIS, "title": "R$"},
-            )
-            st.plotly_chart(fig, use_container_width=True, key="k_fin_mes")
+            st.markdown(f'<div class="sec">Custo da parada — hora mecânico + hora operador · {mes_fin_sel}</div>', unsafe_allow_html=True)
+            df_os_fin = df_os[df_os["mes_os"].astype(str) == mes_fin_sel].copy() if not df_os.empty else pd.DataFrame()
+            if df_os_fin.empty:
+                st.info(f"Nenhuma OS em {mes_fin_sel} para calcular o custo da parada.")
+            elif df_colab.empty:
+                st.info("Cadastre o custo_hora na dim_colaborador para calcular o custo da parada.")
+            else:
+                _ch = df_colab.set_index("_nome")["custo_hora"]
+                _dfp = df_os_fin.copy()
+                _dfp["_h"] = pd.to_numeric(_dfp["tempo_min"], errors="coerce").fillna(0) / 60.0
+                _dfp["_mec"] = _dfp["mecanico"].astype(str).str.strip().str.upper()
+                _dfp["_c_mec"] = _dfp["_h"] * _dfp["_mec"].map(_ch).fillna(0)
+                # Operador: o apontado na OS; se vazio, o vinculado à frota
+                _dfp["_oper"] = ""
+                if "operador" in _dfp.columns:
+                    _dfp["_oper"] = (_dfp["operador"].astype(str).str.strip().str.upper()
+                                     .replace({"NONE": "", "NAN": ""}))
+                if not df_oper.empty:
+                    _fmap = df_oper.set_index("id_frota")["operador"]
+                    _falta = _dfp["_oper"].eq("")
+                    _dfp.loc[_falta, "_oper"] = (_dfp.loc[_falta, "id_frota"].astype(str)
+                                                 .str.strip().map(_fmap).fillna(""))
+                _dfp["_c_op"] = _dfp["_h"] * _dfp["_oper"].map(_ch).fillna(0)
+                _dfp["_c_tot"] = _dfp["_c_mec"] + _dfp["_c_op"]
+
+                p1, p2, p3, p4 = st.columns(4)
+                p1.metric("⏱ Horas Paradas", f"{fmt(_dfp['_h'].sum(), 1)}h",
+                          help="Soma do tempo (hora entrada → saída) das OS do mês")
+                p2.metric("🔧 Custo Mecânico", fmtR(_dfp["_c_mec"].sum()),
+                          help="Tempo da OS × custo_hora do mecânico (dim_colaborador)")
+                p3.metric("👨‍🌾 Custo Operador", fmtR(_dfp["_c_op"].sum()),
+                          help="Tempo da OS × custo_hora do operador parado (dim_colaborador)")
+                p4.metric("💸 Custo Total da Parada", fmtR(_dfp["_c_tot"].sum()))
+                st.caption("Cálculo: tempo da OS × custo_hora da dim_colaborador. "
+                           "Operador: o apontado na OS ou, se vazio, o vinculado à frota (dim_operador_frota).")
+
+                _tp = _dfp[_dfp["_h"] > 0].sort_values("_c_tot", ascending=False).head(30)
+                if _tp.empty:
+                    st.info("As OS do mês não têm tempo de parada registrado (hora entrada/saída).")
+                else:
+                    _t = pd.DataFrame({
+                        "OS": _tp["numero_os"],
+                        "Frota": _tp["id_frota"],
+                        "Parada": _tp["_h"].apply(lambda v: f"{v * 60:.0f} min ({v:.1f}h)"),
+                        "Mecânico": _tp["mecanico"],
+                        "R$ Mecânico": _tp["_c_mec"].apply(fmtR),
+                        "Operador": _tp["_oper"].where(_tp["_oper"].ne(""), "—"),
+                        "R$ Operador": _tp["_c_op"].apply(fmtR),
+                        "Total Parada": _tp["_c_tot"].apply(fmtR),
+                    })
+                    dark_table(_t, height=420)
 
             st.markdown(f'<div class="sec">Lançamentos — {mes_fin_sel}</div>', unsafe_allow_html=True)
             cols_f = [c for c in ["data_fmt", "nfe", "id_fornecedor_sap", "item",
