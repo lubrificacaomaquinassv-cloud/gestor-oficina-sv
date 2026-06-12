@@ -147,6 +147,27 @@ def filtrar_tratores(df, df_frota=None):
 
     return out
 
+def mapa_categoria_frota(df_frota):
+    """id_frota -> categoria (dim_frota)."""
+    if df_frota is None or df_frota.empty:
+        return {}
+    col = "id_frota" if "id_frota" in df_frota.columns else "frota"
+    if col not in df_frota.columns:
+        col = df_frota.columns[0]
+    cat = next((c for c in df_frota.columns if c.lower() in (
+        "categoria", "tipo", "tipo_equipamento", "grupo", "classe", "familia")), None)
+    if not cat:
+        return {}
+    return df_frota.set_index(col)[cat].astype(str).str.strip().str.upper().to_dict()
+
+
+def eh_implemento(categoria):
+    """Implemento acoplado: sem operador próprio (operador está no trator)."""
+    c = str(categoria or "").upper()
+    return any(x in c for x in (
+        "IMPLEMENTO", "REBOQUE", "CARRETA", "PLATAFORMA", "TERCEIRO"))
+
+
 
 from st_supabase_connection import SupabaseConnection
 conn = st.connection("supabase", type=SupabaseConnection, ttl=300)
@@ -484,7 +505,7 @@ def load_transf(_c):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_frota(_c):
-    for table in ("frota", "cadastro_frota", "equipamentos", "vw_frota"):
+    for table in ("dim_frota", "frota", "cadastro_frota", "equipamentos", "vw_frota"):
         try:
             df = sb(table)
             if not df.empty:
@@ -1303,14 +1324,21 @@ with tab5:
                 _dfp["_h"] = pd.to_numeric(_dfp["tempo_min"], errors="coerce").fillna(0) / 60.0
                 _dfp["_mec"] = sem_acento(_dfp["mecanico"])
                 _dfp["_c_mec"] = _dfp["_h"] * _dfp["_mec"].map(busca_ch)
-                # Operador: o apontado na OS; se vazio, o vinculado à frota
+                # Implemento acoplado: sem custo de operador (operador no trator)
+                _cat_map = mapa_categoria_frota(df_frota)
+                _dfp["_impl"] = _dfp["id_frota"].astype(str).str.strip().map(
+                    lambda f: eh_implemento(_cat_map.get(f, "")))
+                if "sistema" in _dfp.columns:
+                    _dfp["_impl"] = _dfp["_impl"] | _dfp["sistema"].astype(str).str.upper().str.contains(
+                        "IMPLEMENTO", na=False)
+                # Operador: o apontado na OS; se vazio, apontamento de campo (só tratores)
                 _dfp["_oper"] = ""
                 if "operador" in _dfp.columns:
                     _dfp["_oper"] = sem_acento(_dfp["operador"])
                     _dfp.loc[_dfp["_oper"].isin(["NAN", "NONE", "<NA>", "NULL", "N/A", "-"]), "_oper"] = ""
                 # 2ª fonte: apontamento de campo (operador na frota até a data da OS)
                 if not df_apont.empty and _dfp["_oper"].eq("").any():
-                    for _i in _dfp.index[_dfp["_oper"].eq("")]:
+                    for _i in _dfp.index[_dfp["_oper"].eq("") & ~_dfp["_impl"]]:
                         _cand = df_apont[df_apont["frota"] == str(_dfp.at[_i, "id_frota"]).strip()]
                         if _cand.empty:
                             continue
@@ -1320,11 +1348,13 @@ with tab5:
                                                 else _cand.iloc[0]["operador"])
                 if not df_oper.empty:
                     _fmap = df_oper.set_index("id_frota")["operador"]
-                    _falta = _dfp["_oper"].eq("")
+                    _falta = _dfp["_oper"].eq("") & ~_dfp["_impl"]
                     _dfp.loc[_falta, "_oper"] = (_dfp.loc[_falta, "id_frota"].astype(str)
                                                  .str.strip().map(_fmap).fillna(""))
                 _dfp["_oper"] = sem_acento(_dfp["_oper"])
+                _dfp.loc[_dfp["_impl"], "_oper"] = ""
                 _dfp["_c_op"] = _dfp["_h"] * _dfp["_oper"].map(busca_ch)
+                _dfp.loc[_dfp["_impl"], "_c_op"] = 0.0
                 _dfp["_c_tot"] = _dfp["_c_mec"] + _dfp["_c_op"]
 
                 p1, p2, p3, p4 = st.columns(4)
@@ -1336,8 +1366,8 @@ with tab5:
                           help="Tempo da OS × custo_hora do operador parado (dim_colaborador)")
                 p4.metric("💸 Custo Total da Parada", fmtR(_dfp["_c_tot"].sum()))
                 st.caption("Cálculo: tempo da OS × custo_hora da dim_colaborador. "
-                           "Operador: 1º o apontado na OS; 2º o apontamento de campo da frota "
-                           "até a data da OS (apontamento_campo); 3º o vínculo fixo (dim_operador_frota).")
+                           "Operador (só trator): 1º apontado na OS; 2º apontamento_campo até a data da OS. "
+                           "Implementos acoplados: custo operador N/A (operador no trator).")
 
                 _tp = _dfp[_dfp["_h"] > 0].sort_values("_c_tot", ascending=False).head(30)
                 if _tp.empty:
@@ -1349,7 +1379,9 @@ with tab5:
                         "Parada": _tp["_h"].apply(lambda v: f"{v * 60:.0f} min ({v:.1f}h)"),
                         "Mecânico": _tp["mecanico"],
                         "R$ Mecânico": _tp["_c_mec"].apply(fmtR),
-                        "Operador": _tp["_oper"].where(_tp["_oper"].ne(""), "—"),
+                        "Operador": _tp.apply(
+                        lambda r: "N/A — implemento" if r.get("_impl") else (
+                            r["_oper"] if r["_oper"] else "—"), axis=1),
                         "R$ Operador": _tp["_c_op"].apply(fmtR),
                         "Total Parada": _tp["_c_tot"].apply(fmtR),
                     })
