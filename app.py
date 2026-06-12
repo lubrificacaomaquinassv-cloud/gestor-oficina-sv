@@ -1294,15 +1294,31 @@ with tab5:
                 st.info("Cadastre o custo_hora na dim_colaborador para calcular o custo da parada.")
             else:
                 _ch = df_colab.set_index("_nome")["custo_hora"]
+                # Busca por nome completo e, se não achar, por primeiro+último nome
+                _ch_fl = {}
+                for _n, _v in _ch.items():
+                    _ts = str(_n).split()
+                    if len(_ts) >= 2:
+                        _k = (_ts[0], _ts[-1])
+                        _ch_fl[_k] = None if _k in _ch_fl else float(_v)
+                def busca_ch(nome):
+                    if nome in _ch.index:
+                        return float(_ch[nome])
+                    _ts = str(nome).split()
+                    if len(_ts) >= 2:
+                        _v = _ch_fl.get((_ts[0], _ts[-1]))
+                        if _v is not None:
+                            return _v
+                    return 0.0
                 _dfp = df_os_fin.copy()
                 _dfp["_h"] = pd.to_numeric(_dfp["tempo_min"], errors="coerce").fillna(0) / 60.0
                 _dfp["_mec"] = sem_acento(_dfp["mecanico"])
-                _dfp["_c_mec"] = _dfp["_h"] * _dfp["_mec"].map(_ch).fillna(0)
+                _dfp["_c_mec"] = _dfp["_h"] * _dfp["_mec"].map(busca_ch)
                 # Operador: o apontado na OS; se vazio, o vinculado à frota
                 _dfp["_oper"] = ""
                 if "operador" in _dfp.columns:
-                    _dfp["_oper"] = (_dfp["operador"].astype(str).str.strip().str.upper()
-                                     .replace({"NONE": "", "NAN": ""}))
+                    _dfp["_oper"] = sem_acento(_dfp["operador"])
+                    _dfp.loc[_dfp["_oper"].isin(["NAN", "NONE", "<NA>", "NULL", "N/A", "-"]), "_oper"] = ""
                 # 2ª fonte: apontamento de campo (operador na frota até a data da OS)
                 if not df_apont.empty and _dfp["_oper"].eq("").any():
                     for _i in _dfp.index[_dfp["_oper"].eq("")]:
@@ -1319,7 +1335,7 @@ with tab5:
                     _dfp.loc[_falta, "_oper"] = (_dfp.loc[_falta, "id_frota"].astype(str)
                                                  .str.strip().map(_fmap).fillna(""))
                 _dfp["_oper"] = sem_acento(_dfp["_oper"])
-                _dfp["_c_op"] = _dfp["_h"] * _dfp["_oper"].map(_ch).fillna(0)
+                _dfp["_c_op"] = _dfp["_h"] * _dfp["_oper"].map(busca_ch)
                 _dfp["_c_tot"] = _dfp["_c_mec"] + _dfp["_c_op"]
 
                 p1, p2, p3, p4 = st.columns(4)
