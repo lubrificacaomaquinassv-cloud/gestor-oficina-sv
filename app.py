@@ -717,18 +717,7 @@ with tab1:
             res_fin = resumo_financeiro_os(fin_mes)
 
             if not res_fin.empty:
-                st.markdown(
-                    f'<div class="sec">Custos do período — {mes_sel_label} · financeiro_os</div>',
-                    unsafe_allow_html=True,
-                )
-                kc1, kc2, kc3, kc4 = st.columns(4)
-                kc1.metric("🔩 Peças", fmtR(res_fin["pecas"].sum()))
-                kc2.metric("🔧 Mão de Obra", fmtR(res_fin["custo_mo"].sum()))
-                kc3.metric("💰 Total OS", fmtR(res_fin["total"].sum()))
-                kc4.metric("📋 OS c/ lançamento", len(res_fin))
-                os_so_mo = len(res_fin[res_fin["pecas"] == 0])
-                if os_so_mo:
-                    st.caption(f"{os_so_mo} OS somente com MO (sem peça aplicada)")
+                pass  # KPIs do financeiro_os movidos para a aba Financeiro
 
             col_r1, col_r2 = st.columns(2)
             with col_r1:
