@@ -30,6 +30,10 @@ div[data-testid="metric-container"] [data-testid="stMetricDelta"]{color:#8aab80!
 div[data-testid="stSelectbox"] label{color:#8aab80!important;}
 div[data-testid="stSelectbox"] > div{background:#111c10!important;border:1px solid #1e2e1c!important;color:#e8edd0!important;}
 div[data-testid="stSelectbox"] div[data-baseweb="select"] > div{color:#e8edd0!important;}
+.stButton button{background:#4a9e3f!important;color:#ffffff!important;border:1px solid #6fcf60!important;
+ font-family:'Barlow Condensed',sans-serif;font-weight:700;letter-spacing:1px;text-transform:uppercase;border-radius:8px;}
+.stButton button:hover{background:#3d8534!important;border-color:#9fe790!important;}
+.stButton button p{color:#ffffff!important;font-weight:700;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -392,6 +396,23 @@ def load_fin_lub(_c):
 
 
 @st.cache_data(ttl=120, show_spinner=False)
+def load_fin_lanc(_c):
+    """Carrega financeiro_lancamento (NF-e de peças/serviços por frota)."""
+    df = sb("financeiro_lancamento", order_col="data", desc=True)
+    if df.empty:
+        return df
+    df = df.copy()
+    df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
+    df["data"] = pd.to_datetime(df["data"], errors="coerce")
+    df["mes_key"] = df["data"].dt.strftime("%Y-%m")
+    df["data_fmt"] = df["data"].dt.strftime("%d/%m/%Y")
+    for col in ("tipo_manutencao", "item", "id_frota", "nfe", "id_fornecedor_sap"):
+        if col in df.columns:
+            df[col] = df[col].fillna("—").astype(str)
+    return df
+
+
+@st.cache_data(ttl=120, show_spinner=False)
 def load_abast(_c):
     df = sb("vw_abastecimento_consolidado", order_col="created_at", desc=True)
     if df.empty:
@@ -534,12 +555,7 @@ def resumo_financeiro_os(df_fin):
 # ── HEADER ────────────────────────────────────────────────────
 h1, h2, h3 = st.columns([1, 8, 2])
 with h1:
-    st.markdown(
-        '<div style="width:44px;height:44px;background:#4a9e3f;border-radius:8px;'
-        'display:flex;align-items:center;justify-content:center;font-weight:700;'
-        'color:#0a1409;font-family:Barlow Condensed,sans-serif;">SV</div>',
-        unsafe_allow_html=True,
-    )
+    st.image("https://raw.githubusercontent.com/lubrificacaomaquinassv-cloud/painel-frota-sv/main/icons/logo_sv.png", width=92)
 with h2:
     st.markdown(
         '<div style="font-family:Barlow Condensed,sans-serif;">'
@@ -572,12 +588,14 @@ df_disp = load_disp(conn)
 df_horas = load_horas_frota(conn, mes_atual_str)
 df_frota = load_frota(conn)
 df_fin = load_financeiro(conn)
+df_fin_lanc = load_fin_lanc(conn)
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔧 Ordens de Serviço",
     "🛢 Lubrificação & Borracharia",
     "⛽ Comboio",
     "📊 Parado × Operando",
+    "💰 Financeiro",
 ])
 
 # ══════════════════════════════════════════════════════════════
@@ -1139,6 +1157,120 @@ with tab4:
                 dt3.columns = ["Frota", "Dias Ativos", "H. Trabalhadas",
                                "H. Paradas", "Disponib. %", "OS no Mês"]
             dark_table(dt3, height=400)
+
+# ══════════════════════════════════════════════════════════════
+# TAB 5 — FINANCEIRO (financeiro_lancamento)
+# ══════════════════════════════════════════════════════════════
+with tab5:
+    st.markdown('<div class="sec">Financeiro — lançamentos de manutenção (NF-e) · financeiro_lancamento</div>', unsafe_allow_html=True)
+    if df_fin_lanc.empty:
+        st.info("Sem lançamentos na tabela financeiro_lancamento.")
+    else:
+        meses_fin = meses_disponiveis(df_fin_lanc["mes_key"], mes_atual_str, n=8)
+        idx_fin = meses_fin.index(mes_atual_str) if mes_atual_str in meses_fin else 0
+        mes_fin_sel = st.selectbox(
+            "Selecionar mês:",
+            options=meses_fin,
+            index=idx_fin,
+            key="sel_mes_fin",
+        )
+        dfl = df_fin_lanc[df_fin_lanc["mes_key"] == mes_fin_sel].copy()
+
+        f1, f2, f3, f4 = st.columns(4)
+        f1.metric("💰 Total no Mês", fmtR(dfl["valor"].sum()))
+        f2.metric("📋 Lançamentos", len(dfl))
+        f3.metric("🚜 Frotas", dfl["id_frota"].nunique() if "id_frota" in dfl.columns else 0)
+        f4.metric("📄 NF-e", dfl["nfe"].nunique() if "nfe" in dfl.columns else 0)
+
+        if dfl.empty:
+            st.info(f"Nenhum lançamento em {mes_fin_sel}.")
+        else:
+            cf1, cf2 = st.columns(2)
+
+            with cf1:
+                st.markdown(
+                    f'<div class="sec">Custo por tipo de manutenção — {mes_fin_sel}</div>',
+                    unsafe_allow_html=True,
+                )
+                if "tipo_manutencao" in dfl.columns:
+                    r = (
+                        dfl.groupby("tipo_manutencao")["valor"].sum().reset_index()
+                        .sort_values("valor", ascending=True).tail(8)
+                    )
+                    fig = go.Figure(go.Bar(
+                        y=r["tipo_manutencao"], x=r["valor"], orientation="h",
+                        marker_color="#4a9e3f",
+                        text=r["valor"].apply(fmtR), textposition="outside",
+                        textfont=dict(color="#e8edd0", size=12),
+                        hovertemplate="%{y}<br>R$ %{x:,.2f}<extra></extra>",
+                    ))
+                    fig.update_layout(
+                        **PDARK, height=280,
+                        xaxis={**PLOT_AXIS},
+                        yaxis={**PLOT_AXIS, "tickfont": dict(color="#e8edd0", size=12)},
+                    )
+                    st.plotly_chart(fig, use_container_width=True, key="k_fin_tipo")
+
+            with cf2:
+                st.markdown(
+                    f'<div class="sec">Top 10 frotas por custo — {mes_fin_sel}</div>',
+                    unsafe_allow_html=True,
+                )
+                if "id_frota" in dfl.columns:
+                    r = (
+                        dfl.groupby("id_frota")["valor"].sum().reset_index()
+                        .sort_values("valor", ascending=True).tail(10)
+                    )
+                    fig = go.Figure(go.Bar(
+                        y=r["id_frota"].astype(str), x=r["valor"], orientation="h",
+                        marker_color="#2980b9",
+                        text=r["valor"].apply(fmtR), textposition="outside",
+                        textfont=dict(color="#e8edd0", size=12),
+                        hovertemplate="Frota %{y}<br>R$ %{x:,.2f}<extra></extra>",
+                    ))
+                    fig.update_layout(
+                        **PDARK, height=280,
+                        xaxis={**PLOT_AXIS},
+                        yaxis={**PLOT_AXIS, "tickfont": dict(color="#e8edd0", size=12)},
+                    )
+                    st.plotly_chart(fig, use_container_width=True, key="k_fin_frota")
+
+            st.markdown('<div class="sec">Evolução mensal — últimos 6 meses</div>', unsafe_allow_html=True)
+            ev = (
+                df_fin_lanc.groupby("mes_key")["valor"].sum().reset_index()
+                .sort_values("mes_key").tail(6)
+            )
+            fig = go.Figure(go.Bar(
+                x=ev["mes_key"], y=ev["valor"],
+                marker_color="#d4a017",
+                text=ev["valor"].apply(fmtR), textposition="outside",
+                textfont=dict(color="#e8edd0", size=11),
+                hovertemplate="%{x}<br>R$ %{y:,.2f}<extra></extra>",
+            ))
+            fig.update_layout(
+                **PDARK, height=250,
+                xaxis={**PLOT_AXIS, "title": "Mês"},
+                yaxis={**PLOT_AXIS, "title": "R$"},
+            )
+            st.plotly_chart(fig, use_container_width=True, key="k_fin_mes")
+
+            st.markdown(f'<div class="sec">Lançamentos — {mes_fin_sel}</div>', unsafe_allow_html=True)
+            cols_f = [c for c in ["data_fmt", "nfe", "id_fornecedor_sap", "item",
+                                  "tipo_manutencao", "id_frota", "valor", "observacao"]
+                      if c in dfl.columns]
+            dtf = dfl.sort_values("data", ascending=False)[cols_f].copy()
+            if "valor" in dtf.columns:
+                dtf["valor"] = dtf["valor"].apply(fmtR)
+            if "observacao" in dtf.columns:
+                dtf["observacao"] = dtf["observacao"].fillna("—")
+            ren = {
+                "data_fmt": "Data", "nfe": "NF-e", "id_fornecedor_sap": "Fornecedor (SAP)",
+                "item": "Item", "tipo_manutencao": "Tipo", "id_frota": "Frota",
+                "valor": "Valor", "observacao": "Observação",
+            }
+            dtf.columns = [ren.get(c, c) for c in cols_f]
+            dark_table(dtf, height=420)
+
 
 st.divider()
 st.markdown(
