@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # Conferir no site apos publicar: deve aparecer este codigo no canto superior direito
-PAINEL_BUILD = "2026-06-13-camada2c"
+PAINEL_BUILD = "2026-06-13-camada2d"
 
 st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
 
@@ -326,19 +326,27 @@ def fmt_mes_label(mes_key):
         return str(mes_key)
 
 
-def agregar_custo_mes(df):
-    """Soma custo_total por mes_key (YYYY-MM), ultimos 6 meses."""
-    if df.empty or "mes_key" not in df.columns:
+def agregar_custo_mes(df, n=6, mes_ref=None):
+    """Soma custo_total por mes (YYYY-MM). Ultimos n meses; meses vazios = zero."""
+    if df.empty:
         return pd.DataFrame(columns=["mes_key", "mes_label", "custo_total"])
     tmp = df.copy()
     if "criado_em" in tmp.columns:
         tmp["mes_key"] = parse_mes_key(parse_dt(tmp["criado_em"]))
-    else:
+    elif "mes_key" in tmp.columns:
         tmp["mes_key"] = parse_mes_key(tmp["mes_key"])
+    else:
+        return pd.DataFrame(columns=["mes_key", "mes_label", "custo_total"])
     tmp["custo_total"] = pd.to_numeric(tmp["custo_total"], errors="coerce").fillna(0)
     tmp = tmp[tmp["mes_key"].notna() & (tmp["mes_key"].astype(str).str.len() >= 7)]
     g = tmp.groupby("mes_key", as_index=False)["custo_total"].sum()
-    g = g.sort_values("mes_key").tail(6)
+    if mes_ref:
+        fim = pd.Period(str(mes_ref), freq="M")
+        chaves = [str(fim - i) for i in range(n - 1, -1, -1)]
+        g = g.set_index("mes_key").reindex(chaves, fill_value=0).reset_index()
+        g.columns = ["mes_key", "custo_total"]
+    else:
+        g = g.sort_values("mes_key").tail(n)
     g["mes_label"] = g["mes_key"].map(fmt_mes_label)
     return g
 
@@ -1312,16 +1320,16 @@ with tab2:
         c3.metric("🚜 Frotas", fin_m["id_frota"].nunique() if "id_frota" in fin_m.columns else 0)
         c4.metric("🛢 Litros (aprox.)", fmt(fin_m["quantidade"].sum(), 1))
 
-        evo_raw, _ = filtrar_fin_lub_painel(df_fin_lub, df_painel)
-        evo = agregar_custo_mes(evo_raw)
+        evo = agregar_custo_mes(df_fin_lub, n=6, mes_ref=mes_lub_sel)
         cg1, cg2, cg3 = st.columns([1, 1, 1])
         with cg1:
             if not evo.empty:
+                cores_evo = ["#4a9e3f" if v > 0 else "#2a3a28" for v in evo["custo_total"]]
                 fig_evo = go.Figure(go.Bar(
                     x=evo["mes_label"],
                     y=evo["custo_total"],
-                    marker_color="#4a9e3f",
-                    text=evo["custo_total"].apply(fmtR),
+                    marker_color=cores_evo,
+                    text=evo["custo_total"].apply(lambda v: fmtR(v) if v > 0 else ""),
                     textposition="outside",
                     textfont=dict(color="#e8edd0", size=10),
                 ))
@@ -1330,29 +1338,39 @@ with tab2:
                     title=dict(text="Evolução mensal (R$)", font=dict(size=12, color="#8aab80")),
                     xaxis={**PLOT_AXIS, "type": "category", "title": "Mês"},
                     yaxis={**PLOT_AXIS, "title": "Total"},
+                    margin=dict(l=10, r=10, t=40, b=10),
                 )
                 st.plotly_chart(fig_evo, use_container_width=True, key="k_lub_evo")
+                st.caption("Histórico completo do financeiro (todos os lançamentos).")
 
         with cg2:
             if not fin_m.empty and "id_frota" in fin_m.columns:
+                fm = fin_m.copy()
+                fm["_fid"] = norm_frota_id(fm["id_frota"])
                 rf = (
-                    fin_m[fin_m["custo_total"] > 0]
-                    .groupby("id_frota")["custo_total"].sum()
-                    .reset_index().sort_values("custo_total", ascending=True).tail(8)
+                    fm[fm["custo_total"] > 0]
+                    .groupby("_fid", as_index=False)["custo_total"].sum()
+                    .sort_values("custo_total", ascending=True)
+                    .tail(8)
                 )
                 if rf.empty:
                     st.caption("Sem custo por frota neste mês.")
                 else:
+                    rf["frota"] = rf["_fid"].astype(str)
                     fig_f = go.Figure(go.Bar(
-                        y=rf["id_frota"].astype(str), x=rf["custo_total"], orientation="h",
+                        y=rf["frota"], x=rf["custo_total"], orientation="h",
                         marker_color="#2980b9",
-                        text=rf["custo_total"].apply(fmtR), textposition="outside",
-                        textfont=dict(color="#e8edd0", size=10),
+                        text=rf["custo_total"].apply(fmtR), textposition="inside",
+                        insidetextanchor="end",
+                        textfont=dict(color="#ffffff", size=11),
                     ))
                     fig_f.update_layout(
-                        **PDARK, height=260,
+                        **PDARK,
+                        height=max(160, len(rf) * 44 + 60),
                         title=dict(text=f"Custo por frota — {mes_lub_sel}", font=dict(size=12, color="#8aab80")),
-                        xaxis={**PLOT_AXIS}, yaxis={**PLOT_AXIS},
+                        xaxis={**PLOT_AXIS, "title": "R$"},
+                        yaxis={**PLOT_AXIS, "type": "category", "categoryorder": "total ascending"},
+                        margin=dict(l=10, r=40, t=40, b=10),
                     )
                     st.plotly_chart(fig_f, use_container_width=True, key="k_lub_frota")
 
@@ -1369,13 +1387,17 @@ with tab2:
                     fig_i = go.Figure(go.Bar(
                         y=ri["insumo_nome"].astype(str), x=ri["custo_total"], orientation="h",
                         marker_color="#8e44ad",
-                        text=ri["custo_total"].apply(fmtR), textposition="outside",
-                        textfont=dict(color="#e8edd0", size=10),
+                        text=ri["custo_total"].apply(fmtR), textposition="inside",
+                        insidetextanchor="end",
+                        textfont=dict(color="#ffffff", size=10),
                     ))
                     fig_i.update_layout(
-                        **PDARK, height=260,
+                        **PDARK,
+                        height=max(160, len(ri) * 40 + 60),
                         title=dict(text=f"Top insumos — {mes_lub_sel}", font=dict(size=12, color="#8aab80")),
-                        xaxis={**PLOT_AXIS}, yaxis={**PLOT_AXIS},
+                        xaxis={**PLOT_AXIS, "title": "R$"},
+                        yaxis={**PLOT_AXIS, "type": "category", "categoryorder": "total ascending"},
+                        margin=dict(l=10, r=40, t=40, b=10),
                     )
                     st.plotly_chart(fig_i, use_container_width=True, key="k_lub_insumo")
 
