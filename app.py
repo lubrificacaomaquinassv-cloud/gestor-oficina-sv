@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # Conferir no site apos publicar: deve aparecer este codigo no canto superior direito
-PAINEL_BUILD = "2026-06-13-camada2d"
+PAINEL_BUILD = "2026-06-13-camada2e"
 
 st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
 
@@ -1338,7 +1338,6 @@ with tab2:
                     title=dict(text="Evolução mensal (R$)", font=dict(size=12, color="#8aab80")),
                     xaxis={**PLOT_AXIS, "type": "category", "title": "Mês"},
                     yaxis={**PLOT_AXIS, "title": "Total"},
-                    margin=dict(l=10, r=10, t=40, b=10),
                 )
                 st.plotly_chart(fig_evo, use_container_width=True, key="k_lub_evo")
                 st.caption("Histórico completo do financeiro (todos os lançamentos).")
@@ -1370,7 +1369,6 @@ with tab2:
                         title=dict(text=f"Custo por frota — {mes_lub_sel}", font=dict(size=12, color="#8aab80")),
                         xaxis={**PLOT_AXIS, "title": "R$"},
                         yaxis={**PLOT_AXIS, "type": "category", "categoryorder": "total ascending"},
-                        margin=dict(l=10, r=40, t=40, b=10),
                     )
                     st.plotly_chart(fig_f, use_container_width=True, key="k_lub_frota")
 
@@ -1397,7 +1395,6 @@ with tab2:
                         title=dict(text=f"Top insumos — {mes_lub_sel}", font=dict(size=12, color="#8aab80")),
                         xaxis={**PLOT_AXIS, "title": "R$"},
                         yaxis={**PLOT_AXIS, "type": "category", "categoryorder": "total ascending"},
-                        margin=dict(l=10, r=40, t=40, b=10),
                     )
                     st.plotly_chart(fig_i, use_container_width=True, key="k_lub_insumo")
 
