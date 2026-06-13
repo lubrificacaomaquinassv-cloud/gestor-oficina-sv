@@ -148,7 +148,7 @@ def filtrar_tratores(df, df_frota=None):
     return out
 
 def mapa_categoria_frota(df_frota):
-    """id_frota -> categoria (dim_frota)."""
+    """id_frota -> {categoria, modelo} (dim_frota)."""
     if df_frota is None or df_frota.empty:
         return {}
     col = "id_frota" if "id_frota" in df_frota.columns else "frota"
@@ -156,18 +156,41 @@ def mapa_categoria_frota(df_frota):
         col = df_frota.columns[0]
     cat = next((c for c in df_frota.columns if c.lower() in (
         "categoria", "tipo", "tipo_equipamento", "grupo", "classe", "familia")), None)
-    if not cat:
-        return {}
-    tmp = df_frota[[col, cat]].copy()
+    cols = [col]
+    if cat:
+        cols.append(cat)
+    if "modelo" in df_frota.columns:
+        cols.append("modelo")
+    tmp = df_frota[cols].copy()
     tmp[col] = tmp[col].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-    return tmp.set_index(col)[cat].astype(str).str.strip().str.upper().to_dict()
+    out = {}
+    for _, row in tmp.iterrows():
+        fid = str(row[col]).strip()
+        meta = {"categoria": "", "modelo": ""}
+        if cat:
+            meta["categoria"] = str(row.get(cat) or "").strip().upper()
+        if "modelo" in row.index:
+            meta["modelo"] = str(row.get("modelo") or "").strip().upper()
+        out[fid] = meta
+    return out
 
 
-def eh_implemento(categoria):
+def eh_implemento(categoria, modelo=""):
     """Implemento acoplado: sem operador próprio (operador está no trator)."""
-    c = str(categoria or "").upper()
-    return any(x in c for x in (
-        "IMPLEMENTO", "REBOQUE", "CARRETA", "PLATAFORMA", "TERCEIRO"))
+    c = str(categoria or "").upper().strip()
+    m = str(modelo or "").upper().strip()
+    if not c and not m:
+        return False
+    # Autopropulsado / trator: nunca tratar como implemento acoplado
+    _motor = ("TRATOR", "COLHEIT", "AUTOMOT", "CAMINH", "MAQUINA", "MÁQUINA",
+              "PULVER", "PLANTIO", "GRUA", "ESCAV", "T7", "T6", "BH ", "MF ",
+              "BM ", "A114", "AGRALE", "PATROL")
+    if any(x in m for x in _motor) or any(x in c for x in _motor):
+        return False
+    if not c:
+        return False
+    # TERCEIRO removido: gerava falso positivo (ex. frota 9999)
+    return any(x in c for x in ("IMPLEMENTO", "REBOQUE", "CARRETA", "PLATAFORMA"))
 
 
 
@@ -1328,9 +1351,19 @@ with tab5:
                 _dfp["_c_mec"] = _dfp["_h"] * _dfp["_mec"].map(busca_ch)
                 # Implemento acoplado: sem custo de operador (operador no trator)
                 _cat_map = mapa_categoria_frota(df_frota)
+                _frotas_apont = set()
+                if not df_apont.empty and "frota" in df_apont.columns:
+                    _frotas_apont = set(
+                        df_apont["frota"].astype(str).str.strip().str.replace(
+                            r"\.0$", "", regex=True))
+                def _eh_impl_frota(f):
+                    f = str(f).strip()
+                    if f in _frotas_apont:
+                        return False
+                    meta = _cat_map.get(f) or {}
+                    return eh_implemento(meta.get("categoria", ""), meta.get("modelo", ""))
                 _dfp["_impl"] = _dfp["id_frota"].astype(str).str.strip().str.replace(
-                    r"\.0$", "", regex=True).map(
-                    lambda f: eh_implemento(_cat_map.get(f, "")))
+                    r"\.0$", "", regex=True).map(_eh_impl_frota)
                 # Operador: o apontado na OS; se vazio, apontamento de campo (só tratores)
                 _dfp["_oper"] = ""
                 if "operador" in _dfp.columns:
