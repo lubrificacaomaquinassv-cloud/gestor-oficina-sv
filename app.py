@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # Conferir no site apos publicar: deve aparecer este codigo no canto superior direito
-PAINEL_BUILD = "2026-06-13-camada2b"
+PAINEL_BUILD = "2026-06-13-camada2c"
 
 st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
 
@@ -316,6 +316,31 @@ def parse_mes_key(series):
         dt = parse_dt(series[miss])
         out.loc[miss] = dt.dt.strftime("%Y-%m")
     return out
+
+
+def fmt_mes_label(mes_key):
+    """2026-06 -> Jun/2026 (eixo legivel, sem confundir com dias)."""
+    try:
+        return pd.Period(str(mes_key), freq="M").strftime("%b/%Y")
+    except Exception:
+        return str(mes_key)
+
+
+def agregar_custo_mes(df):
+    """Soma custo_total por mes_key (YYYY-MM), ultimos 6 meses."""
+    if df.empty or "mes_key" not in df.columns:
+        return pd.DataFrame(columns=["mes_key", "mes_label", "custo_total"])
+    tmp = df.copy()
+    if "criado_em" in tmp.columns:
+        tmp["mes_key"] = parse_mes_key(parse_dt(tmp["criado_em"]))
+    else:
+        tmp["mes_key"] = parse_mes_key(tmp["mes_key"])
+    tmp["custo_total"] = pd.to_numeric(tmp["custo_total"], errors="coerce").fillna(0)
+    tmp = tmp[tmp["mes_key"].notna() & (tmp["mes_key"].astype(str).str.len() >= 7)]
+    g = tmp.groupby("mes_key", as_index=False)["custo_total"].sum()
+    g = g.sort_values("mes_key").tail(6)
+    g["mes_label"] = g["mes_key"].map(fmt_mes_label)
+    return g
 
 
 def meses_disponiveis(series, mes_atual_str, n=6):
@@ -672,7 +697,7 @@ def load_fin_lub(_c):
     df = df.copy()
     df["_fonte"] = fonte
     df["custo_total"] = pd.to_numeric(df["custo_total"], errors="coerce").fillna(0)
-    if "mes_key" not in df.columns and "criado_em" in df.columns:
+    if "criado_em" in df.columns:
         df["mes_key"] = parse_mes_key(parse_dt(df["criado_em"]))
     elif "mes_key" in df.columns:
         df["mes_key"] = parse_mes_key(df["mes_key"])
@@ -1288,28 +1313,23 @@ with tab2:
         c4.metric("🛢 Litros (aprox.)", fmt(fin_m["quantidade"].sum(), 1))
 
         evo_raw, _ = filtrar_fin_lub_painel(df_fin_lub, df_painel)
-        evo = (
-            evo_raw.groupby("mes_key", as_index=False)["custo_total"].sum()
-            .sort_values("mes_key")
-            .tail(6)
-        )
+        evo = agregar_custo_mes(evo_raw)
         cg1, cg2, cg3 = st.columns([1, 1, 1])
         with cg1:
             if not evo.empty:
-                fig_evo = go.Figure(go.Scatter(
-                    x=evo["mes_key"], y=evo["custo_total"],
-                    mode="lines+markers+text",
-                    line=dict(color="#4a9e3f", width=3),
-                    marker=dict(size=8),
+                fig_evo = go.Figure(go.Bar(
+                    x=evo["mes_label"],
+                    y=evo["custo_total"],
+                    marker_color="#4a9e3f",
                     text=evo["custo_total"].apply(fmtR),
-                    textposition="top center",
+                    textposition="outside",
                     textfont=dict(color="#e8edd0", size=10),
                 ))
                 fig_evo.update_layout(
                     **PDARK, height=260,
                     title=dict(text="Evolução mensal (R$)", font=dict(size=12, color="#8aab80")),
-                    xaxis={**PLOT_AXIS},
-                    yaxis={**PLOT_AXIS},
+                    xaxis={**PLOT_AXIS, "type": "category", "title": "Mês"},
+                    yaxis={**PLOT_AXIS, "title": "Total"},
                 )
                 st.plotly_chart(fig_evo, use_container_width=True, key="k_lub_evo")
 
