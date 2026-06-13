@@ -356,6 +356,40 @@ def status_lub(hr):
     return "OK"
 
 
+def enriquecer_lub(df_lub, df_frota):
+    """Marca implementos e linhas sem horímetro válido (não entram nos gráficos)."""
+    if df_lub.empty:
+        return df_lub
+    df = df_lub.copy()
+    col_frota = "vehicle" if "vehicle" in df.columns else "frota"
+    df["_fid"] = (
+        df[col_frota].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    )
+    cat_map = mapa_categoria_frota(df_frota)
+
+    def eh_impl_frota(fid):
+        meta = cat_map.get(str(fid).strip(), {})
+        if eh_implemento(meta.get("categoria", ""), meta.get("modelo", "")):
+            return True
+        return False
+
+    df["_implemento"] = df["_fid"].map(eh_impl_frota)
+    if "modelo" in df.columns:
+        df["_implemento"] = df["_implemento"] | df["modelo"].astype(str).str.upper().str.contains(
+            r"IMPLEMENTO|REBOQUE|CARRETA|PLATAFORMA", na=False, regex=True)
+    df["_fid_upper"] = df["_fid"].astype(str).str.upper()
+    df["_implemento"] = df["_implemento"] | df["_fid_upper"].str.contains(
+        r"IMPLEMENTO|IMPL\.|^IMP\b|REBOQUE|CARRETA", na=False, regex=True)
+
+    for col in ("h_atual", "h_proxima_troca", "horas_restantes"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["_sem_horimetro"] = df["h_atual"].isna() | df["h_proxima_troca"].isna() | df["horas_restantes"].isna()
+    df["_monitoravel"] = ~df["_implemento"] & ~df["_sem_horimetro"]
+    return df
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def load_lub_v4(_c):
     df = sb("vw_proxima_troca_v4")
@@ -873,20 +907,32 @@ with tab2:
     else:
         fonte = df_lub["_fonte"].iloc[0] if "_fonte" in df_lub.columns else "—"
         col_frota = "vehicle" if "vehicle" in df_lub.columns else "frota"
-        df_lub_u = df_lub.copy()
-        df_lub_u["_urg"] = df_lub_u["horas_restantes"].fillna(99999)
-        df_lub_u = df_lub_u.sort_values("_urg", ascending=True)
+        df_lub_e = enriquecer_lub(df_lub, df_frota)
+        df_mon = df_lub_e[df_lub_e["_monitoravel"]].copy()
+        df_excl = df_lub_e[~df_lub_e["_monitoravel"]].copy()
+
+        n_impl = int(df_excl["_implemento"].sum())
+        n_sem_h = int((~df_excl["_implemento"] & df_excl["_sem_horimetro"]).sum())
+        df_lub_u = df_mon.sort_values("horas_restantes", ascending=True)
 
         ok = int((df_lub_u["status_troca"] == "OK").sum())
         prx = int((df_lub_u["status_troca"] == "PROXIMO").sum())
         atr = int((df_lub_u["status_troca"] == "EM ATRASO").sum())
-        st.caption(f"Fonte horímetros: {fonte} · {len(df_lub_u)} equipamentos monitorados")
+        st.caption(
+            f"Fonte horímetros: {fonte} · {len(df_mon)} motorizados com horímetro · "
+            f"{len(df_lub_e)} cadastrados no total"
+        )
+        if not df_excl.empty:
+            st.caption(
+                f"Fora dos gráficos: {n_impl} implemento(s) · {n_sem_h} sem horímetro válido "
+                f"(implemento não usa horímetro de troca de óleo)."
+            )
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("✅ OK", ok)
         m2.metric("⚠️ Próximo ≤100h", prx)
         m3.metric("🔴 Em atraso", atr)
-        m4.metric("📋 Total", len(df_lub_u))
+        m4.metric("📋 Monitorados", len(df_mon))
 
         g1, g2 = st.columns([1, 2])
         with g1:
@@ -900,36 +946,62 @@ with tab2:
             ))
             fig_st.update_layout(
                 **PDARK, height=280,
-                title=dict(text="Status das trocas", font=dict(size=13, color="#8aab80")),
+                title=dict(text="Status — só motorizados", font=dict(size=13, color="#8aab80")),
                 showlegend=False,
             )
             st.plotly_chart(fig_st, use_container_width=True, key="k_lub_status")
 
         with g2:
-            top_u = df_lub_u[df_lub_u["status_troca"].isin(["EM ATRASO", "PROXIMO"])].head(12)
+            top_u = df_lub_u[
+                df_lub_u["status_troca"].isin(["EM ATRASO", "PROXIMO"])
+                & df_lub_u["horas_restantes"].notna()
+            ].head(12)
             if top_u.empty:
-                top_u = df_lub_u.head(8)
-            cores = top_u["status_troca"].map({
-                "OK": "#4a9e3f", "PROXIMO": "#d4a017", "EM ATRASO": "#c0392b",
-            }).fillna("#666")
-            fig_u = go.Figure(go.Bar(
-                y=top_u[col_frota].astype(str),
-                x=top_u["horas_restantes"],
-                orientation="h",
-                marker_color=cores,
-                text=top_u["horas_restantes"].apply(lambda v: f"{v:+.0f}h" if pd.notna(v) else "—"),
-                textposition="outside",
-                textfont=dict(color="#e8edd0", size=11),
-            ))
-            fig_u.update_layout(
-                **PDARK, height=280,
-                title=dict(text="Urgência — horas até a próxima troca", font=dict(size=13, color="#8aab80")),
-                xaxis={**PLOT_AXIS, "title": "Horas restantes"},
-                yaxis={**PLOT_AXIS, "autorange": "reversed"},
-            )
-            st.plotly_chart(fig_u, use_container_width=True, key="k_lub_urg")
+                st.info("Nenhum motorizado em atraso ou próximo da troca.")
+            else:
+                cores = top_u["status_troca"].map({
+                    "OK": "#4a9e3f", "PROXIMO": "#d4a017", "EM ATRASO": "#c0392b",
+                }).fillna("#666")
+                fig_u = go.Figure(go.Bar(
+                    y=top_u[col_frota].astype(str),
+                    x=top_u["horas_restantes"],
+                    orientation="h",
+                    marker_color=cores,
+                    text=top_u["horas_restantes"].apply(lambda v: f"{v:+.0f}h"),
+                    textposition="outside",
+                    textfont=dict(color="#e8edd0", size=11),
+                ))
+                fig_u.update_layout(
+                    **PDARK, height=280,
+                    title=dict(
+                        text="Urgência — horas restantes (próxima − atual)",
+                        font=dict(size=13, color="#8aab80"),
+                    ),
+                    xaxis={**PLOT_AXIS, "title": "Horas restantes", "zeroline": True},
+                    yaxis={**PLOT_AXIS, "autorange": "reversed"},
+                )
+                fig_u.add_vline(x=0, line_dash="dash", line_color="#888", line_width=1)
+                fig_u.add_vline(x=100, line_dash="dot", line_color="#d4a017", line_width=1)
+                st.plotly_chart(fig_u, use_container_width=True, key="k_lub_urg")
+                st.caption(
+                    "Negativo = passou da troca · 0 a 100h = alerta · implementos não entram neste gráfico."
+                )
 
-        st.markdown('<div class="sec">Detalhe horímetros — prioridade</div>', unsafe_allow_html=True)
+        if not df_excl.empty:
+            with st.expander(f"Cadastros fora do painel de horímetro ({len(df_excl)})"):
+                dx = df_excl[[col_frota]].copy()
+                dx["Motivo"] = df_excl.apply(
+                    lambda r: "Implemento (sem horímetro de troca)"
+                    if r["_implemento"]
+                    else "Sem horímetro válido",
+                    axis=1,
+                )
+                if "modelo" in df_excl.columns:
+                    dx["Modelo"] = df_excl["modelo"].fillna("—")
+                dx = dx.rename(columns={col_frota: "Frota"})
+                dark_table(dx, height=180)
+
+        st.markdown('<div class="sec">Detalhe horímetros — motorizados</div>', unsafe_allow_html=True)
 
         def badge(s):
             return {"OK": "🟢 OK", "PROXIMO": "🟡 PRÓXIMO", "EM ATRASO": "🔴 EM ATRASO"}.get(s, f"⚪ {s}")
@@ -1001,40 +1073,48 @@ with tab2:
         with cg2:
             if not fin_m.empty and "id_frota" in fin_m.columns:
                 rf = (
-                    fin_m.groupby("id_frota")["custo_total"].sum()
+                    fin_m[fin_m["custo_total"] > 0]
+                    .groupby("id_frota")["custo_total"].sum()
                     .reset_index().sort_values("custo_total", ascending=True).tail(8)
                 )
-                fig_f = go.Figure(go.Bar(
-                    y=rf["id_frota"].astype(str), x=rf["custo_total"], orientation="h",
-                    marker_color="#2980b9",
-                    text=rf["custo_total"].apply(fmtR), textposition="outside",
-                    textfont=dict(color="#e8edd0", size=10),
-                ))
-                fig_f.update_layout(
-                    **PDARK, height=260,
-                    title=dict(text=f"Custo por frota — {mes_lub_sel}", font=dict(size=12, color="#8aab80")),
-                    xaxis={**PLOT_AXIS}, yaxis={**PLOT_AXIS},
-                )
-                st.plotly_chart(fig_f, use_container_width=True, key="k_lub_frota")
+                if rf.empty:
+                    st.caption("Sem custo por frota neste mês.")
+                else:
+                    fig_f = go.Figure(go.Bar(
+                        y=rf["id_frota"].astype(str), x=rf["custo_total"], orientation="h",
+                        marker_color="#2980b9",
+                        text=rf["custo_total"].apply(fmtR), textposition="outside",
+                        textfont=dict(color="#e8edd0", size=10),
+                    ))
+                    fig_f.update_layout(
+                        **PDARK, height=260,
+                        title=dict(text=f"Custo por frota — {mes_lub_sel}", font=dict(size=12, color="#8aab80")),
+                        xaxis={**PLOT_AXIS}, yaxis={**PLOT_AXIS},
+                    )
+                    st.plotly_chart(fig_f, use_container_width=True, key="k_lub_frota")
 
         with cg3:
             if not fin_m.empty and "insumo_nome" in fin_m.columns:
                 ri = (
-                    fin_m.groupby("insumo_nome")["custo_total"].sum()
+                    fin_m[fin_m["custo_total"] > 0]
+                    .groupby("insumo_nome")["custo_total"].sum()
                     .reset_index().sort_values("custo_total", ascending=True).tail(8)
                 )
-                fig_i = go.Figure(go.Bar(
-                    y=ri["insumo_nome"].astype(str), x=ri["custo_total"], orientation="h",
-                    marker_color="#8e44ad",
-                    text=ri["custo_total"].apply(fmtR), textposition="outside",
-                    textfont=dict(color="#e8edd0", size=10),
-                ))
-                fig_i.update_layout(
-                    **PDARK, height=260,
-                    title=dict(text=f"Top insumos — {mes_lub_sel}", font=dict(size=12, color="#8aab80")),
-                    xaxis={**PLOT_AXIS}, yaxis={**PLOT_AXIS},
-                )
-                st.plotly_chart(fig_i, use_container_width=True, key="k_lub_insumo")
+                if ri.empty:
+                    st.caption("Sem insumos com custo neste mês.")
+                else:
+                    fig_i = go.Figure(go.Bar(
+                        y=ri["insumo_nome"].astype(str), x=ri["custo_total"], orientation="h",
+                        marker_color="#8e44ad",
+                        text=ri["custo_total"].apply(fmtR), textposition="outside",
+                        textfont=dict(color="#e8edd0", size=10),
+                    ))
+                    fig_i.update_layout(
+                        **PDARK, height=260,
+                        title=dict(text=f"Top insumos — {mes_lub_sel}", font=dict(size=12, color="#8aab80")),
+                        xaxis={**PLOT_AXIS}, yaxis={**PLOT_AXIS},
+                    )
+                    st.plotly_chart(fig_i, use_container_width=True, key="k_lub_insumo")
 
         st.caption(
             "Fonte: financeiro_lubrificacao (app v3). "
