@@ -473,6 +473,20 @@ def norm_frota_id(s):
     return s.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
 
 
+def operador_apontamento(frota, data_os, df_apont):
+    """Ultimo operador em apontamento_campo ate a data da OS (sem outras fontes)."""
+    if df_apont is None or df_apont.empty:
+        return ""
+    fid = norm_frota_id(pd.Series([frota])).iloc[0]
+    cand = df_apont[df_apont["frota"] == fid].sort_values("data")
+    if cand.empty:
+        return ""
+    if pd.notna(data_os):
+        ate = cand[cand["data"] <= data_os]
+        return str(ate.iloc[-1]["operador"]) if not ate.empty else ""
+    return str(cand.iloc[-1]["operador"])
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_apont(_c):
     """apontamento_campo: quem operou cada frota em cada data."""
@@ -852,65 +866,196 @@ with tab1:
 # TAB 2 — LUBRIFICAÇÃO + BORRACHARIA
 # ══════════════════════════════════════════════════════════════
 with tab2:
-    st.markdown('<div class="sec">Lubrificação — horímetros de troca de óleo</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">Lubrificação — painel analítico</div>', unsafe_allow_html=True)
+
     if df_lub.empty:
-        st.info("Sem dados de lubrificação.")
+        st.info("Sem dados de lubrificação (lubrificacao_v3).")
     else:
         fonte = df_lub["_fonte"].iloc[0] if "_fonte" in df_lub.columns else "—"
-        st.caption(f"Fonte: {fonte} · {len(df_lub)} equipamentos")
+        col_frota = "vehicle" if "vehicle" in df_lub.columns else "frota"
+        df_lub_u = df_lub.copy()
+        df_lub_u["_urg"] = df_lub_u["horas_restantes"].fillna(99999)
+        df_lub_u = df_lub_u.sort_values("_urg", ascending=True)
 
-        ok = (df_lub["status_troca"] == "OK").sum()
-        prx = (df_lub["status_troca"] == "PROXIMO").sum()
-        atr = (df_lub["status_troca"] == "EM ATRASO").sum()
-        l1, l2, l3, l4 = st.columns(4)
-        l1.metric("✅ OK", ok)
-        l2.metric("⚠️ Próximo ≤100h", prx)
-        l3.metric("🔴 Em Atraso", atr)
-        l4.metric("📋 Total", len(df_lub))
+        ok = int((df_lub_u["status_troca"] == "OK").sum())
+        prx = int((df_lub_u["status_troca"] == "PROXIMO").sum())
+        atr = int((df_lub_u["status_troca"] == "EM ATRASO").sum())
+        st.caption(f"Fonte horímetros: {fonte} · {len(df_lub_u)} equipamentos monitorados")
 
-        if not df_fin_lub.empty and "mes_key" in df_fin_lub.columns:
-            fin_mes_lub = df_fin_lub[df_fin_lub["mes_key"] == mes_atual_str]
-            if not fin_mes_lub.empty:
-                st.markdown(
-                    f'<div class="sec">Custos lubrificação — {mes_atual_str} · financeiro_lubrificacao</div>',
-                    unsafe_allow_html=True,
-                )
-                fc1, fc2, fc3 = st.columns(3)
-                fc1.metric("💰 Total mês", fmtR(fin_mes_lub["custo_total"].sum()))
-                fc2.metric("📋 Lançamentos", len(fin_mes_lub))
-                fc3.metric("🛢 Frotas", fin_mes_lub["id_frota"].nunique())
-                st.caption("Atualize preços em preco_insumo / dim_insumo para custos automáticos no app novo.")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("✅ OK", ok)
+        m2.metric("⚠️ Próximo ≤100h", prx)
+        m3.metric("🔴 Em atraso", atr)
+        m4.metric("📋 Total", len(df_lub_u))
 
-        st.markdown(
-            '<div class="sec">Equipamentos — ordem de urgência (top 15)</div>',
-            unsafe_allow_html=True,
-        )
-        st.caption("🟢 OK · 🟡 Próximo · 🔴 Em atraso — os mais urgentes aparecem primeiro")
+        g1, g2 = st.columns([1, 2])
+        with g1:
+            fig_st = go.Figure(go.Pie(
+                labels=["OK", "Próximo", "Em atraso"],
+                values=[ok, prx, atr],
+                hole=0.55,
+                marker=dict(colors=["#4a9e3f", "#d4a017", "#c0392b"]),
+                textinfo="label+value",
+                textfont=dict(color="#e8edd0", size=11),
+            ))
+            fig_st.update_layout(
+                **PDARK, height=280,
+                title=dict(text="Status das trocas", font=dict(size=13, color="#8aab80")),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_st, use_container_width=True, key="k_lub_status")
+
+        with g2:
+            top_u = df_lub_u[df_lub_u["status_troca"].isin(["EM ATRASO", "PROXIMO"])].head(12)
+            if top_u.empty:
+                top_u = df_lub_u.head(8)
+            cores = top_u["status_troca"].map({
+                "OK": "#4a9e3f", "PROXIMO": "#d4a017", "EM ATRASO": "#c0392b",
+            }).fillna("#666")
+            fig_u = go.Figure(go.Bar(
+                y=top_u[col_frota].astype(str),
+                x=top_u["horas_restantes"],
+                orientation="h",
+                marker_color=cores,
+                text=top_u["horas_restantes"].apply(lambda v: f"{v:+.0f}h" if pd.notna(v) else "—"),
+                textposition="outside",
+                textfont=dict(color="#e8edd0", size=11),
+            ))
+            fig_u.update_layout(
+                **PDARK, height=280,
+                title=dict(text="Urgência — horas até a próxima troca", font=dict(size=13, color="#8aab80")),
+                xaxis={**PLOT_AXIS, "title": "Horas restantes"},
+                yaxis={**PLOT_AXIS, "autorange": "reversed"},
+            )
+            st.plotly_chart(fig_u, use_container_width=True, key="k_lub_urg")
+
+        st.markdown('<div class="sec">Detalhe horímetros — prioridade</div>', unsafe_allow_html=True)
 
         def badge(s):
             return {"OK": "🟢 OK", "PROXIMO": "🟡 PRÓXIMO", "EM ATRASO": "🔴 EM ATRASO"}.get(s, f"⚪ {s}")
 
-        col_frota = "vehicle" if "vehicle" in df_lub.columns else "frota"
         cols_show = [col_frota, "h_na_troca", "h_proxima_troca", "h_atual", "horas_restantes", "status_troca"]
-        cols_show = [c for c in cols_show if c in df_lub.columns]
-
-        dt = df_lub.sort_values("horas_restantes", ascending=True).head(15)[cols_show].copy()
+        cols_show = [c for c in cols_show if c in df_lub_u.columns]
+        dt = df_lub_u.head(20)[cols_show].copy()
         dt["h_na_troca"] = dt["h_na_troca"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
         dt["h_proxima_troca"] = dt["h_proxima_troca"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
         dt["h_atual"] = dt["h_atual"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
         dt["horas_restantes"] = dt["horas_restantes"].apply(
             lambda v: f"{v:+.0f}h" if pd.notna(v) else "—")
         dt["status_troca"] = dt["status_troca"].apply(badge)
-        rename = {
-            col_frota: "Frota",
-            "h_na_troca": "H. Troca",
-            "h_proxima_troca": "Próxima (h)",
-            "h_atual": "H. Atual",
-            "horas_restantes": "Restante",
-            "status_troca": "Status",
-        }
-        dt = dt.rename(columns=rename)
-        dark_table(dt, height=520)
+        dt = dt.rename(columns={
+            col_frota: "Frota", "h_na_troca": "H. Troca", "h_proxima_troca": "Próxima (h)",
+            "h_atual": "H. Atual", "horas_restantes": "Restante", "status_troca": "Status",
+        })
+        dark_table(dt, height=380)
+
+    st.divider()
+    st.markdown('<div class="sec">Custos lubrificação — financeiro_lubrificacao</div>', unsafe_allow_html=True)
+
+    if df_fin_lub.empty or "mes_key" not in df_fin_lub.columns:
+        st.info("Sem lançamentos em financeiro_lubrificacao.")
+    else:
+        meses_lub = meses_disponiveis(df_fin_lub["mes_key"], mes_atual_str, n=8)
+        idx_lub = meses_lub.index(mes_atual_str) if mes_atual_str in meses_lub else 0
+        mes_lub_sel = st.selectbox(
+            "Mês dos custos:",
+            options=meses_lub,
+            index=idx_lub,
+            key="sel_mes_lub",
+        )
+        fin_m = df_fin_lub[df_fin_lub["mes_key"] == mes_lub_sel].copy()
+        fin_m["custo_total"] = pd.to_numeric(fin_m["custo_total"], errors="coerce").fillna(0)
+        fin_m["quantidade"] = pd.to_numeric(fin_m.get("quantidade", 0), errors="coerce").fillna(0)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("💰 Total", fmtR(fin_m["custo_total"].sum()))
+        c2.metric("📋 Itens", len(fin_m))
+        c3.metric("🚜 Frotas", fin_m["id_frota"].nunique() if "id_frota" in fin_m.columns else 0)
+        c4.metric("🛢 Litros (aprox.)", fmt(fin_m["quantidade"].sum(), 1))
+
+        evo = (
+            df_fin_lub.groupby("mes_key", as_index=False)["custo_total"].sum()
+            .sort_values("mes_key")
+            .tail(6)
+        )
+        cg1, cg2, cg3 = st.columns([1, 1, 1])
+        with cg1:
+            if not evo.empty:
+                fig_evo = go.Figure(go.Scatter(
+                    x=evo["mes_key"], y=evo["custo_total"],
+                    mode="lines+markers+text",
+                    line=dict(color="#4a9e3f", width=3),
+                    marker=dict(size=8),
+                    text=evo["custo_total"].apply(fmtR),
+                    textposition="top center",
+                    textfont=dict(color="#e8edd0", size=10),
+                ))
+                fig_evo.update_layout(
+                    **PDARK, height=260,
+                    title=dict(text="Evolução mensal (R$)", font=dict(size=12, color="#8aab80")),
+                    xaxis={**PLOT_AXIS},
+                    yaxis={**PLOT_AXIS},
+                )
+                st.plotly_chart(fig_evo, use_container_width=True, key="k_lub_evo")
+
+        with cg2:
+            if not fin_m.empty and "id_frota" in fin_m.columns:
+                rf = (
+                    fin_m.groupby("id_frota")["custo_total"].sum()
+                    .reset_index().sort_values("custo_total", ascending=True).tail(8)
+                )
+                fig_f = go.Figure(go.Bar(
+                    y=rf["id_frota"].astype(str), x=rf["custo_total"], orientation="h",
+                    marker_color="#2980b9",
+                    text=rf["custo_total"].apply(fmtR), textposition="outside",
+                    textfont=dict(color="#e8edd0", size=10),
+                ))
+                fig_f.update_layout(
+                    **PDARK, height=260,
+                    title=dict(text=f"Custo por frota — {mes_lub_sel}", font=dict(size=12, color="#8aab80")),
+                    xaxis={**PLOT_AXIS}, yaxis={**PLOT_AXIS},
+                )
+                st.plotly_chart(fig_f, use_container_width=True, key="k_lub_frota")
+
+        with cg3:
+            if not fin_m.empty and "insumo_nome" in fin_m.columns:
+                ri = (
+                    fin_m.groupby("insumo_nome")["custo_total"].sum()
+                    .reset_index().sort_values("custo_total", ascending=True).tail(8)
+                )
+                fig_i = go.Figure(go.Bar(
+                    y=ri["insumo_nome"].astype(str), x=ri["custo_total"], orientation="h",
+                    marker_color="#8e44ad",
+                    text=ri["custo_total"].apply(fmtR), textposition="outside",
+                    textfont=dict(color="#e8edd0", size=10),
+                ))
+                fig_i.update_layout(
+                    **PDARK, height=260,
+                    title=dict(text=f"Top insumos — {mes_lub_sel}", font=dict(size=12, color="#8aab80")),
+                    xaxis={**PLOT_AXIS}, yaxis={**PLOT_AXIS},
+                )
+                st.plotly_chart(fig_i, use_container_width=True, key="k_lub_insumo")
+
+        st.caption(
+            "Fonte: financeiro_lubrificacao (app v3). "
+            "lubrificacao_v2 não entra neste painel — use AUDITAR_LUBRIFICACAO_V2.sql para conferir."
+        )
+        cols_fin = [c for c in ["id_frota", "insumo_nome", "quantidade", "valor_unitario",
+                                "custo_total", "order_number", "localizacao"]
+                    if c in fin_m.columns]
+        dfin = fin_m.sort_values("custo_total", ascending=False)[cols_fin].copy()
+        if "quantidade" in dfin.columns:
+            dfin["quantidade"] = dfin["quantidade"].apply(lambda v: fmt(v, 1))
+        if "valor_unitario" in dfin.columns:
+            dfin["valor_unitario"] = dfin["valor_unitario"].apply(fmtR)
+        if "custo_total" in dfin.columns:
+            dfin["custo_total"] = dfin["custo_total"].apply(fmtR)
+        dfin = dfin.rename(columns={
+            "id_frota": "Frota", "insumo_nome": "Insumo", "quantidade": "Qtd",
+            "valor_unitario": "R$/un", "custo_total": "Total", "order_number": "Ordem",
+            "localizacao": "Local",
+        })
+        dark_table(dfin, height=320)
 
     st.divider()
     st.markdown('<div class="sec">Borracharia — OS recentes</div>', unsafe_allow_html=True)
@@ -1342,13 +1487,21 @@ with tab5:
                         _k = (_ts[0], _ts[-1])
                         _ch_fl[_k] = None if _k in _ch_fl else float(_v)
                 def busca_ch(nome):
+                    nome = str(nome or "").strip()
+                    if not nome:
+                        return 0.0
                     if nome in _ch.index:
                         return float(_ch[nome])
-                    _ts = str(nome).split()
+                    _ts = nome.split()
                     if len(_ts) >= 2:
                         _v = _ch_fl.get((_ts[0], _ts[-1]))
                         if _v is not None:
                             return _v
+                    if len(_ts) == 1:
+                        _pre = _ts[0]
+                        hits = [n for n in _ch.index if n == _pre or n.startswith(_pre + " ")]
+                        if len(hits) == 1:
+                            return float(_ch[hits[0]])
                     return 0.0
                 _dfp = df_os_fin.copy()
                 _dfp["_h"] = pd.to_numeric(_dfp["tempo_min"], errors="coerce").fillna(0) / 60.0
@@ -1369,22 +1522,17 @@ with tab5:
                     return eh_implemento(meta.get("categoria", ""), meta.get("modelo", ""))
                 _dfp["_impl"] = _dfp["id_frota"].astype(str).str.strip().str.replace(
                     r"\.0$", "", regex=True).map(_eh_impl_frota)
-                # Operador: o apontado na OS; se vazio, apontamento de campo (só tratores)
+                # Operador: 1º na OS; 2º apontamento_campo ate a data da OS; 3º dim_operador_frota
                 _dfp["_oper"] = ""
                 if "operador" in _dfp.columns:
                     _dfp["_oper"] = sem_acento(_dfp["operador"])
                     _dfp.loc[_dfp["_oper"].isin(["NAN", "NONE", "<NA>", "NULL", "N/A", "-"]), "_oper"] = ""
-                # 2ª fonte: apontamento de campo (operador na frota até a data da OS)
                 if not df_apont.empty and _dfp["_oper"].eq("").any():
                     for _i in _dfp.index[_dfp["_oper"].eq("") & ~_dfp["_impl"]]:
-                        _fid = norm_frota_id(pd.Series([_dfp.at[_i, "id_frota"]])).iloc[0]
-                        _cand = df_apont[df_apont["frota"] == _fid]
-                        if _cand.empty:
-                            continue
-                        _d = _dfp.at[_i, "data_os"]
-                        _ate = _cand[_cand["data"] <= _d] if pd.notna(_d) else _cand
-                        _dfp.at[_i, "_oper"] = (_ate.iloc[-1]["operador"] if not _ate.empty
-                                                else _cand.iloc[0]["operador"])
+                        _op = operador_apontamento(
+                            _dfp.at[_i, "id_frota"], _dfp.at[_i, "data_os"], df_apont)
+                        if _op:
+                            _dfp.at[_i, "_oper"] = _op
                 if not df_oper.empty:
                     _fmap = df_oper.set_index("id_frota")["operador"]
                     _falta = _dfp["_oper"].eq("") & ~_dfp["_impl"]
