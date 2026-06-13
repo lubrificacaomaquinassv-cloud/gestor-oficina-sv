@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # Conferir no site apos publicar: deve aparecer este codigo no canto superior direito
-PAINEL_BUILD = "2026-06-13-camada2"
+PAINEL_BUILD = "2026-06-13-camada2b"
 
 st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
 
@@ -577,7 +577,9 @@ def load_lub_painel(_c):
     if "status_troca" in df.columns:
         df.loc[df["status_troca"] == "SEM_HORIMETRO", "status_troca"] = pd.NA
     df["h_na_troca"] = pd.NA
-    df["_fonte"] = df["fonte_horimetro"].fillna("vw_painel_lub_status") if "fonte_horimetro" in df.columns else "vw_painel_lub_status"
+    df["_fonte"] = "vw_painel_lub_status"
+    if "fonte_horimetro" in df.columns:
+        df["_fonte_horimetro"] = df["fonte_horimetro"].fillna("—")
     return df
 
 
@@ -957,23 +959,6 @@ df_fin_lanc = load_fin_lanc(conn)
 df_colab = load_colab(conn)
 df_oper = load_operadores(conn)
 df_apont = load_apont(conn)
-
-_painel_ids = len(df_painel) if not df_painel.empty else 0
-_lub_fonte = df_lub["_fonte"].iloc[0] if not df_lub.empty and "_fonte" in df_lub.columns else "—"
-_fin_fonte = df_fin_lub["_fonte"].iloc[0] if not df_fin_lub.empty and "_fonte" in df_fin_lub.columns else "—"
-if str(_lub_fonte).startswith("vw_painel") and str(_fin_fonte).startswith("vw_painel"):
-    st.success(
-        f"Camada painel ativa · lub: {_lub_fonte} · custos: {_fin_fonte} · "
-        f"{_painel_ids} frotas em dim_frota_painel",
-        icon="✅",
-    )
-else:
-    st.warning(
-        f"Camada painel parcial ou legado · lub: {_lub_fonte} · custos: {_fin_fonte}. "
-        "Publique o app.py novo (PUBLICAR PAINEL.bat) e rode os SQLs no Supabase.",
-        icon="⚠️",
-    )
-st.divider()
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔧 Ordens de Serviço",
