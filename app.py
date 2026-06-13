@@ -468,6 +468,11 @@ def sem_acento(s):
         return x.strip().upper()
     return s.map(_norm)
 
+def norm_frota_id(s):
+    """3369 e 3369.0 viram a mesma chave (OS x apontamento_campo)."""
+    return s.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_apont(_c):
     """apontamento_campo: quem operou cada frota em cada data."""
@@ -476,7 +481,7 @@ def load_apont(_c):
         return df
     df = df.copy()
     df["data"] = pd.to_datetime(df["data"], errors="coerce").dt.date
-    df["frota"] = df["frota"].astype(str).str.strip()
+    df["frota"] = norm_frota_id(df["frota"])
     df["operador"] = sem_acento(df["operador"])
     return df.dropna(subset=["data"]).sort_values("data")
 
@@ -501,8 +506,8 @@ def load_operadores(_c):
     df = df.copy()
     if "ativo" in df.columns:
         df = df[df["ativo"].astype(str).str.upper().isin(["TRUE", "1", "SIM", "S"])]
-    df["id_frota"] = df["id_frota"].astype(str).str.strip()
-    df["operador"] = df["operador"].astype(str).str.strip().str.upper()
+    df["id_frota"] = norm_frota_id(df["id_frota"])
+    df["operador"] = sem_acento(df["operador"])
     return df.drop_duplicates(subset=["id_frota"], keep="first")
 
 
@@ -1372,7 +1377,8 @@ with tab5:
                 # 2ª fonte: apontamento de campo (operador na frota até a data da OS)
                 if not df_apont.empty and _dfp["_oper"].eq("").any():
                     for _i in _dfp.index[_dfp["_oper"].eq("") & ~_dfp["_impl"]]:
-                        _cand = df_apont[df_apont["frota"] == str(_dfp.at[_i, "id_frota"]).strip()]
+                        _fid = norm_frota_id(pd.Series([_dfp.at[_i, "id_frota"]])).iloc[0]
+                        _cand = df_apont[df_apont["frota"] == _fid]
                         if _cand.empty:
                             continue
                         _d = _dfp.at[_i, "data_os"]
@@ -1382,8 +1388,8 @@ with tab5:
                 if not df_oper.empty:
                     _fmap = df_oper.set_index("id_frota")["operador"]
                     _falta = _dfp["_oper"].eq("") & ~_dfp["_impl"]
-                    _dfp.loc[_falta, "_oper"] = (_dfp.loc[_falta, "id_frota"].astype(str)
-                                                 .str.strip().map(_fmap).fillna(""))
+                    _dfp.loc[_falta, "_oper"] = (
+                        norm_frota_id(_dfp.loc[_falta, "id_frota"]).map(_fmap).fillna(""))
                 _dfp["_oper"] = sem_acento(_dfp["_oper"])
                 _dfp.loc[_dfp["_impl"], "_oper"] = ""
                 _dfp["_c_op"] = _dfp["_h"] * _dfp["_oper"].map(busca_ch)
