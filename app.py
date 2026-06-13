@@ -3,6 +3,9 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
+# Conferir no site apos publicar: deve aparecer este codigo no canto superior direito
+PAINEL_BUILD = "2026-06-13-camada2"
+
 st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
 
 st.markdown("""
@@ -420,6 +423,68 @@ def status_lub(hr):
     return "OK"
 
 
+def horimetro_placeholder(h_atual, h_proxima):
+    """Leitura 1/1 (ou igual e baixa) usada so para fechar OS — nao e horimetro real."""
+    try:
+        a = float(h_atual)
+        p = float(h_proxima)
+    except (TypeError, ValueError):
+        return False
+    return a <= 10 and p == a
+
+
+def _aplicar_flags_horimetro(df, df_painel=None):
+    """Placeholder OS + monitora_horimetro=false + frota fora do cadastro painel."""
+    if "horimetro_placeholder" in df.columns:
+        df["_placeholder"] = df["horimetro_placeholder"].fillna(False).astype(bool)
+    else:
+        df["_placeholder"] = df.apply(
+            lambda r: horimetro_placeholder(r.get("h_atual"), r.get("h_proxima_troca")),
+            axis=1,
+        )
+    if df_painel is not None and not df_painel.empty:
+        ids_painel = set(df_painel["id_frota"].astype(str).str.strip())
+        df["_fora_cadastro"] = ~df["_fid"].isin(ids_painel)
+        if "monitora_horimetro" in df_painel.columns:
+            mon_map = (
+                df_painel.assign(id_frota=df_painel["id_frota"].astype(str).str.strip())
+                .set_index("id_frota")["monitora_horimetro"]
+            )
+            df["_horimetro_quebrado"] = df["_fid"].map(
+                lambda f: f in ids_painel and not bool(mon_map.get(str(f).strip(), True))
+            )
+        else:
+            df["_horimetro_quebrado"] = False
+    else:
+        df["_fora_cadastro"] = False
+        df["_horimetro_quebrado"] = False
+    df["_sem_horimetro"] = (
+        df["_sem_horimetro"]
+        | df["_placeholder"]
+        | df["_horimetro_quebrado"]
+        | df["_fora_cadastro"]
+    )
+    return df
+
+
+def filtrar_fin_lub_painel(df, df_painel):
+    """Custos lub: so frotas cadastradas no painel e elegiveis (motorizadas)."""
+    if df.empty or df_painel is None or df_painel.empty or "id_frota" not in df.columns:
+        return df, 0
+    painel = df_painel.copy()
+    painel["id_frota"] = painel["id_frota"].astype(str).str.strip()
+    elegiveis = painel[
+        painel["monitora_horimetro"].fillna(True).astype(bool)
+        & ~painel["categoria_painel"].isin(["IMPLEMENTO", "TERCEIRO"])
+    ]["id_frota"]
+    ids_ok = set(elegiveis.astype(str))
+    df = df.copy()
+    df["_fid"] = df["id_frota"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    mask = df["_fid"].isin(ids_ok) & (pd.to_numeric(df["custo_total"], errors="coerce").fillna(0) > 0)
+    n_excl = int((~mask).sum())
+    return df.loc[mask].drop(columns=["_fid"], errors="ignore"), n_excl
+
+
 def enriquecer_lub(df_lub, df_frota, df_painel=None):
     """Marca implementos e linhas sem horímetro válido (não entram nos gráficos)."""
     if df_lub.empty:
@@ -457,7 +522,13 @@ def enriquecer_lub(df_lub, df_frota, df_painel=None):
             )
         else:
             df["_implemento"] = False
-        df["_monitoravel"] = df["monitoravel"].fillna(False).astype(bool)
+        df = _aplicar_flags_horimetro(df, df_painel)
+        df["_monitoravel"] = (
+            df["monitoravel"].fillna(False).astype(bool)
+            & ~df["_placeholder"]
+            & ~df["_horimetro_quebrado"]
+            & ~df["_fora_cadastro"]
+        )
         return df
 
     cat_map = mapa_categoria_frota(df_frota, df_painel)
@@ -487,6 +558,7 @@ def enriquecer_lub(df_lub, df_frota, df_painel=None):
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df["_sem_horimetro"] = df["h_atual"].isna() | df["h_proxima_troca"].isna() | df["horas_restantes"].isna()
+    df = _aplicar_flags_horimetro(df, df_painel)
     df["_monitoravel"] = ~df["_implemento"] & ~df["_terceiro"] & ~df["_sem_horimetro"]
     return df
 
@@ -589,11 +661,14 @@ def load_lub(_c):
 @st.cache_data(ttl=120, show_spinner=False)
 def load_fin_lub(_c):
     df = sb("vw_painel_lub_fin", order_col="criado_em", desc=True)
+    fonte = "vw_painel_lub_fin"
     if df.empty:
         df = sb("financeiro_lubrificacao", order_col="criado_em", desc=True)
+        fonte = "financeiro_lubrificacao"
     if df.empty:
         return df
     df = df.copy()
+    df["_fonte"] = fonte
     df["custo_total"] = pd.to_numeric(df["custo_total"], errors="coerce").fillna(0)
     if "mes_key" not in df.columns and "criado_em" in df.columns:
         df["mes_key"] = parse_mes_key(parse_dt(df["criado_em"]))
@@ -859,6 +934,7 @@ with h3:
         st.rerun()
     agora_br = datetime.utcnow() - timedelta(hours=3)
     st.caption(agora_br.strftime("%d/%m/%Y %H:%M") + " (Brasília)")
+    st.caption(f"Build {PAINEL_BUILD}")
 
 st.divider()
 
@@ -881,6 +957,23 @@ df_fin_lanc = load_fin_lanc(conn)
 df_colab = load_colab(conn)
 df_oper = load_operadores(conn)
 df_apont = load_apont(conn)
+
+_painel_ids = len(df_painel) if not df_painel.empty else 0
+_lub_fonte = df_lub["_fonte"].iloc[0] if not df_lub.empty and "_fonte" in df_lub.columns else "—"
+_fin_fonte = df_fin_lub["_fonte"].iloc[0] if not df_fin_lub.empty and "_fonte" in df_fin_lub.columns else "—"
+if str(_lub_fonte).startswith("vw_painel") and str(_fin_fonte).startswith("vw_painel"):
+    st.success(
+        f"Camada painel ativa · lub: {_lub_fonte} · custos: {_fin_fonte} · "
+        f"{_painel_ids} frotas em dim_frota_painel",
+        icon="✅",
+    )
+else:
+    st.warning(
+        f"Camada painel parcial ou legado · lub: {_lub_fonte} · custos: {_fin_fonte}. "
+        "Publique o app.py novo (PUBLICAR PAINEL.bat) e rode os SQLs no Supabase.",
+        icon="⚠️",
+    )
+st.divider()
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔧 Ordens de Serviço",
@@ -1048,13 +1141,20 @@ with tab2:
         st.info("Sem dados de lubrificação (vw_painel_lub_status).")
     else:
         fonte = df_lub["_fonte"].iloc[0] if "_fonte" in df_lub.columns else "—"
-        col_frota = "vehicle" if "vehicle" in df_lub.columns else "frota"
+        col_frota = (
+            "vehicle" if "vehicle" in df_lub.columns
+            else "id_frota" if "id_frota" in df_lub.columns
+            else "frota"
+        )
         df_lub_e = enriquecer_lub(df_lub, df_frota, df_painel)
         df_mon = df_lub_e[df_lub_e["_monitoravel"]].copy()
         df_excl = df_lub_e[~df_lub_e["_monitoravel"]].copy()
 
         n_impl = int(df_excl["_implemento"].sum())
         n_sem_h = int((~df_excl["_implemento"] & df_excl["_sem_horimetro"]).sum())
+        n_ph = int(df_excl.get("_placeholder", pd.Series(False, index=df_excl.index)).sum())
+        n_quebr = int(df_excl.get("_horimetro_quebrado", pd.Series(False, index=df_excl.index)).sum())
+        n_fora = int(df_excl.get("_fora_cadastro", pd.Series(False, index=df_excl.index)).sum())
         df_lub_u = df_mon.sort_values("horas_restantes", ascending=True)
 
         ok = int((df_lub_u["status_troca"] == "OK").sum())
@@ -1066,8 +1166,8 @@ with tab2:
         )
         if not df_excl.empty:
             st.caption(
-                f"Fora dos gráficos: {n_impl} implemento(s) · {n_sem_h} sem horímetro válido "
-                f"(implemento não usa horímetro de troca de óleo)."
+                f"Fora dos gráficos: {n_impl} implemento(s) · {n_quebr} horímetro quebrado · "
+                f"{n_ph} placeholder OS · {n_fora} fora do cadastro painel · {n_sem_h} sem horímetro."
             )
 
         m1, m2, m3, m4 = st.columns(4)
@@ -1135,6 +1235,12 @@ with tab2:
                 dx["Motivo"] = df_excl.apply(
                     lambda r: "Implemento (sem horímetro de troca)"
                     if r["_implemento"]
+                    else "Horímetro quebrado (cadastro painel)"
+                    if r.get("_horimetro_quebrado")
+                    else "Leitura placeholder (1/1 na OS)"
+                    if r.get("_placeholder")
+                    else "Frota fora do cadastro painel"
+                    if r.get("_fora_cadastro")
                     else "Frota de terceiros"
                     if r.get("_terceiro")
                     else "Sem horímetro válido",
@@ -1179,7 +1285,14 @@ with tab2:
             index=idx_lub,
             key="sel_mes_lub",
         )
-        fin_m = df_fin_lub[df_fin_lub["mes_key"] == mes_lub_sel].copy()
+        fin_m_raw = df_fin_lub[df_fin_lub["mes_key"] == mes_lub_sel].copy()
+        fin_m, n_fin_excl = filtrar_fin_lub_painel(fin_m_raw, df_painel)
+        fin_fonte = df_fin_lub["_fonte"].iloc[0] if "_fonte" in df_fin_lub.columns else "vw_painel_lub_fin"
+        if fin_m.empty:
+            st.info(
+                "Nenhum custo elegivel neste mes "
+                "(implementos, terceiros e horimetro quebrado ficam fora do painel)."
+            )
         fin_m["custo_total"] = pd.to_numeric(fin_m["custo_total"], errors="coerce").fillna(0)
         fin_m["quantidade"] = pd.to_numeric(fin_m.get("quantidade", 0), errors="coerce").fillna(0)
 
@@ -1189,8 +1302,9 @@ with tab2:
         c3.metric("🚜 Frotas", fin_m["id_frota"].nunique() if "id_frota" in fin_m.columns else 0)
         c4.metric("🛢 Litros (aprox.)", fmt(fin_m["quantidade"].sum(), 1))
 
+        evo_raw, _ = filtrar_fin_lub_painel(df_fin_lub, df_painel)
         evo = (
-            df_fin_lub.groupby("mes_key", as_index=False)["custo_total"].sum()
+            evo_raw.groupby("mes_key", as_index=False)["custo_total"].sum()
             .sort_values("mes_key")
             .tail(6)
         )
@@ -1261,8 +1375,9 @@ with tab2:
                     st.plotly_chart(fig_i, use_container_width=True, key="k_lub_insumo")
 
         st.caption(
-            "Fonte: financeiro_lubrificacao (app v3). "
-            "lubrificacao_v2 não entra neste painel — use AUDITAR_LUBRIFICACAO_V2.sql para conferir."
+            f"Fonte: {fin_fonte} · exibindo só frotas motorizadas do painel "
+            f"({n_fin_excl} linha(s) do mês excluídas: implemento/terceiro/horimetro quebrado). "
+            "lubrificacao_v2 (litros campo) nao entra aqui — use AUDITAR_LUBRIFICACAO_V2.sql."
         )
         cols_fin = [c for c in ["id_frota", "insumo_nome", "quantidade", "valor_unitario",
                                 "custo_total", "order_number", "localizacao"]
