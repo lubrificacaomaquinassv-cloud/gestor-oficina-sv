@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # Conferir no site apos publicar: deve aparecer este codigo no canto superior direito
-PAINEL_BUILD = "2026-06-13-camada2f"
+PAINEL_BUILD = "2026-06-13-camada2g"
 
 st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
 
@@ -1898,21 +1898,32 @@ with tab5:
                     unsafe_allow_html=True,
                 )
                 if "id_frota" in dfl.columns:
+                    dff = dfl.copy()
+                    dff["_fid"] = norm_frota_id(dff["id_frota"])
                     r = (
-                        dfl.groupby("id_frota")["valor"].sum().reset_index()
-                        .sort_values("valor", ascending=True).tail(10)
+                        dff.groupby("_fid", as_index=False)["valor"].sum()
+                        .sort_values("valor", ascending=True)
+                        .tail(10)
                     )
+                    r["frota"] = r["_fid"].astype(str)
                     fig = go.Figure(go.Bar(
-                        y=r["id_frota"].astype(str), x=r["valor"], orientation="h",
+                        y=r["frota"], x=r["valor"], orientation="h",
                         marker_color="#2980b9",
-                        text=r["valor"].apply(fmtR), textposition="outside",
-                        textfont=dict(color="#e8edd0", size=12),
+                        text=r["valor"].apply(fmtR), textposition="inside",
+                        insidetextanchor="end",
+                        textfont=dict(color="#ffffff", size=11),
                         hovertemplate="Frota %{y}<br>R$ %{x:,.2f}<extra></extra>",
                     ))
                     fig.update_layout(
-                        **PDARK, height=280,
-                        xaxis={**PLOT_AXIS},
-                        yaxis={**PLOT_AXIS, "tickfont": dict(color="#e8edd0", size=12)},
+                        **PDARK,
+                        height=max(160, len(r) * 44 + 60),
+                        xaxis={**PLOT_AXIS, "title": "R$"},
+                        yaxis={
+                            **PLOT_AXIS,
+                            "type": "category",
+                            "categoryorder": "total ascending",
+                            "tickfont": dict(color="#e8edd0", size=12),
+                        },
                     )
                     st.plotly_chart(fig, use_container_width=True, key="k_fin_frota")
 
