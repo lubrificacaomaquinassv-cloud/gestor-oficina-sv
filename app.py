@@ -108,7 +108,7 @@ def label_trator(row):
     return str(frota)
 
 
-def filtrar_tratores(df, df_frota=None):
+def filtrar_tratores(df, df_frota=None, df_painel=None):
     """Disponibilidade de frota: somente tratores (exclui implementos)."""
     if df.empty:
         return df
@@ -125,15 +125,22 @@ def filtrar_tratores(df, df_frota=None):
         frota_col = "id_frota" if "id_frota" in df_frota.columns else "frota"
         if frota_col not in df_frota.columns:
             frota_col = df_frota.columns[0]
-        tipo_cols = [c for c in df_frota.columns if c.lower() in (
-            "tipo", "categoria", "tipo_equipamento", "grupo", "classe", "familia")]
-        if tipo_cols:
-            tc = tipo_cols[0]
-            fmap = df_frota.set_index(frota_col)[tc].astype(str).str.upper()
-            out["_tipo_frota"] = out["id_frota"].astype(str).map(fmap).fillna("")
-            out = out[~out["_tipo_frota"].str.contains(
-                "IMPLEMENTO|REBOQUE|CARRETA|PLATAFORMA|SEM APONT", na=False, regex=True)]
-            return out.drop(columns=["_tipo_frota"], errors="ignore")
+        cat_map = mapa_categoria_frota(df_frota, df_painel)
+        out["_cat"] = out["id_frota"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True).map(
+            lambda f: norm_categoria((cat_map.get(f) or {}).get("categoria", ""))
+        )
+        out["_mod"] = out["id_frota"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True).map(
+            lambda f: str((cat_map.get(f) or {}).get("modelo", "")).upper()
+        )
+        out = out[
+            ~out.apply(
+                lambda r: eh_implemento(r["_cat"], r["_mod"])
+                or eh_terceiro(r["_cat"], r["_mod"], r["id_frota"])
+                or excluir_disponibilidade(r["_cat"], r["id_frota"]),
+                axis=1,
+            )
+        ]
+        return out.drop(columns=["_cat", "_mod"], errors="ignore")
 
     for col in ["tipo", "categoria", "tipo_equipamento", "grupo", "classe", "familia"]:
         if col in out.columns:
@@ -147,50 +154,99 @@ def filtrar_tratores(df, df_frota=None):
 
     return out
 
-def mapa_categoria_frota(df_frota):
-    """id_frota -> {categoria, modelo} (dim_frota)."""
-    if df_frota is None or df_frota.empty:
-        return {}
-    col = "id_frota" if "id_frota" in df_frota.columns else "frota"
-    if col not in df_frota.columns:
-        col = df_frota.columns[0]
-    cat = next((c for c in df_frota.columns if c.lower() in (
-        "categoria", "tipo", "tipo_equipamento", "grupo", "classe", "familia")), None)
-    cols = [col]
-    if cat:
-        cols.append(cat)
-    if "modelo" in df_frota.columns:
-        cols.append("modelo")
-    tmp = df_frota[cols].copy()
-    tmp[col] = tmp[col].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+def mapa_categoria_frota(df_frota, df_painel=None):
+    """id_frota -> {categoria, modelo}. dim_frota_painel sobrescreve dim_frota."""
     out = {}
-    for _, row in tmp.iterrows():
-        fid = str(row[col]).strip()
-        meta = {"categoria": "", "modelo": ""}
+    if df_frota is not None and not df_frota.empty:
+        col = "id_frota" if "id_frota" in df_frota.columns else "frota"
+        if col not in df_frota.columns:
+            col = df_frota.columns[0]
+        cat = next((c for c in df_frota.columns if c.lower() in (
+            "categoria", "tipo", "tipo_equipamento", "grupo", "classe", "familia")), None)
+        cols = [col]
         if cat:
-            meta["categoria"] = str(row.get(cat) or "").strip().upper()
-        if "modelo" in row.index:
-            meta["modelo"] = str(row.get("modelo") or "").strip().upper()
-        out[fid] = meta
+            cols.append(cat)
+        if "modelo" in df_frota.columns:
+            cols.append("modelo")
+        tmp = df_frota[cols].copy()
+        tmp[col] = tmp[col].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+        for _, row in tmp.iterrows():
+            fid = str(row[col]).strip()
+            meta = {"categoria": "", "modelo": ""}
+            if cat:
+                meta["categoria"] = str(row.get(cat) or "").strip().upper()
+            if "modelo" in row.index:
+                meta["modelo"] = str(row.get("modelo") or "").strip().upper()
+            out[fid] = meta
+    if df_painel is not None and not df_painel.empty:
+        for _, row in df_painel.iterrows():
+            fid = str(row.get("id_frota", "")).strip()
+            if not fid:
+                continue
+            out[fid] = {
+                "categoria": str(row.get("categoria_painel") or row.get("categoria") or "").strip().upper(),
+                "modelo": str(row.get("modelo") or "").strip().upper(),
+            }
     return out
 
 
-def eh_implemento(categoria, modelo=""):
-    """Implemento acoplado: sem operador próprio (operador está no trator)."""
-    c = str(categoria or "").upper().strip()
+def norm_categoria(c):
+    return str(c or "").upper().strip().replace("Á", "A").replace("Ã", "A")
+
+
+# Taxonomia dim_frota.categoria (padrao SV)
+_CAT_IMPLEMENTO = frozenset({"IMPLEMENTO", "REBOQUE", "CARRETA", "PLATAFORMA"})
+_CAT_MOTOR = frozenset({
+    "EQUIPAMENTO", "TRATOR", "MAQUINA", "CAMINHAO", "MOTO",
+    "COLHEIT", "COLHEITADEIRA", "VEICULO_PESADO", "VEICULO_LEVE",
+})
+_FROTA_TERCEIRO = frozenset({"9999", "920K", "920"})
+
+
+def eh_terceiro(categoria="", modelo="", id_frota=""):
+    """Frota alugada/terceirizada — fora do painel da frota propria."""
+    fid = str(id_frota or "").strip().upper()
+    if fid in _FROTA_TERCEIRO:
+        return True
+    c = norm_categoria(categoria)
+    if c == "TERCEIRO":
+        return True
     m = str(modelo or "").upper().strip()
-    if not c and not m:
+    return m in ("TERCEIRO", "TERCEIROS")
+
+
+def eh_implemento(categoria, modelo=""):
+    """Implemento acoplado: sem operador proprio (operador esta no trator)."""
+    c = norm_categoria(categoria)
+    m = str(modelo or "").upper().strip()
+    if c in _CAT_MOTOR:
         return False
-    # Autopropulsado / trator: nunca tratar como implemento acoplado
-    _motor = ("TRATOR", "COLHEIT", "AUTOMOT", "CAMINH", "MAQUINA", "MÁQUINA",
-              "PULVER", "PLANTIO", "GRUA", "ESCAV", "T7", "T6", "BH ", "MF ",
-              "BM ", "A114", "AGRALE", "PATROL")
-    if any(x in m for x in _motor) or any(x in c for x in _motor):
+    if c in _CAT_IMPLEMENTO:
+        return True
+    # Legado: categoria vazia/antiga — inferir pelo modelo (match exato de palavra, nao substring)
+    _motor_m = (
+        "TRATOR", "COLHEIT", "CAMINH", "MAQUINA", "GERADOR", "MOTO", "XRE", "CRF",
+        "AGRALE", "PULVER", "PLANTIO", "GRUA", "ESCAV", "T7", "T6", "PATROL",
+    )
+    if any(x in m for x in _motor_m):
         return False
-    if not c:
-        return False
-    # TERCEIRO removido: gerava falso positivo (ex. frota 9999)
-    return any(x in c for x in ("IMPLEMENTO", "REBOQUE", "CARRETA", "PLATAFORMA"))
+    _impl_m = (
+        "GRADE", "SULCAD", "CALCARE", "PLAINA", "ROLO", "ESCAR",
+        "IMPLEMENTO", "REBOQUE", "CARRETA", "PLATAFORMA",
+    )
+    if any(x in m for x in _impl_m):
+        return True
+    return False
+
+
+def excluir_disponibilidade(categoria, id_frota=""):
+    """Parado x Operando: fora implemento, moto, caminhao e terceiros."""
+    if eh_terceiro(categoria, id_frota=id_frota):
+        return True
+    c = norm_categoria(categoria)
+    if eh_implemento(c, ""):
+        return True
+    return c in ("MOTO", "CAMINHAO", "VEICULO_LEVE", "VEICULO_PESADO", "TERCEIRO")
 
 
 
@@ -323,9 +379,17 @@ def melhor_data_os(df):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_os(_c):
-    df = sb("ordem_servico", order_col="created_at", desc=True)
+    df = sb("vw_painel_os", order_col="created_at", desc=True)
+    if df.empty:
+        df = sb("ordem_servico", order_col="created_at", desc=True)
     if df.empty:
         return df
+    df = df.copy()
+    if "tipo_manutencao" not in df.columns:
+        extra = sb("ordem_servico", order_col="created_at", desc=True)
+        if not extra.empty and "tipo_manutencao" in extra.columns and "numero_os" in extra.columns:
+            ex = extra[["numero_os", "tipo_manutencao"]].drop_duplicates(subset=["numero_os"], keep="first")
+            df = df.merge(ex, on="numero_os", how="left")
     df["dt"] = melhor_data_os(df)
     df["data_os"] = df["dt"].dt.date
     df["mes_os"] = df["dt"].dt.to_period("M")
@@ -356,16 +420,47 @@ def status_lub(hr):
     return "OK"
 
 
-def enriquecer_lub(df_lub, df_frota):
+def enriquecer_lub(df_lub, df_frota, df_painel=None):
     """Marca implementos e linhas sem horímetro válido (não entram nos gráficos)."""
     if df_lub.empty:
         return df_lub
     df = df_lub.copy()
-    col_frota = "vehicle" if "vehicle" in df.columns else "frota"
+    col_frota = "vehicle" if "vehicle" in df.columns else ("id_frota" if "id_frota" in df.columns else "frota")
     df["_fid"] = (
         df[col_frota].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
     )
-    cat_map = mapa_categoria_frota(df_frota)
+
+    for col in ("h_atual", "h_proxima_troca", "horas_restantes"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["_sem_horimetro"] = df["h_atual"].isna() | df["h_proxima_troca"].isna() | df["horas_restantes"].isna()
+
+    if "monitoravel" in df.columns:
+        if "eh_terceiro" in df.columns:
+            df["_terceiro"] = df["eh_terceiro"].fillna(False).astype(bool)
+        else:
+            cat_map = mapa_categoria_frota(df_frota, df_painel)
+            df["_terceiro"] = df["_fid"].map(
+                lambda fid: eh_terceiro(
+                    (cat_map.get(str(fid).strip(), {}) or {}).get("categoria", ""),
+                    (cat_map.get(str(fid).strip(), {}) or {}).get("modelo", ""),
+                    fid,
+                )
+            )
+        if "categoria_painel" in df.columns:
+            df["_implemento"] = df.apply(
+                lambda r: not r["_terceiro"] and eh_implemento(
+                    r.get("categoria_painel", ""), r.get("modelo", "")
+                ),
+                axis=1,
+            )
+        else:
+            df["_implemento"] = False
+        df["_monitoravel"] = df["monitoravel"].fillna(False).astype(bool)
+        return df
+
+    cat_map = mapa_categoria_frota(df_frota, df_painel)
 
     def eh_impl_frota(fid):
         meta = cat_map.get(str(fid).strip(), {})
@@ -374,19 +469,43 @@ def enriquecer_lub(df_lub, df_frota):
         return False
 
     df["_implemento"] = df["_fid"].map(eh_impl_frota)
+    df["_terceiro"] = df["_fid"].map(
+        lambda fid: eh_terceiro(
+            (cat_map.get(str(fid).strip(), {}) or {}).get("categoria", ""),
+            (cat_map.get(str(fid).strip(), {}) or {}).get("modelo", ""),
+            fid,
+        )
+    )
     if "modelo" in df.columns:
-        df["_implemento"] = df["_implemento"] | df["modelo"].astype(str).str.upper().str.contains(
-            r"IMPLEMENTO|REBOQUE|CARRETA|PLATAFORMA", na=False, regex=True)
-    df["_fid_upper"] = df["_fid"].astype(str).str.upper()
-    df["_implemento"] = df["_implemento"] | df["_fid_upper"].str.contains(
-        r"IMPLEMENTO|IMPL\.|^IMP\b|REBOQUE|CARRETA", na=False, regex=True)
+        m = df["modelo"].astype(str).str.upper()
+        df["_implemento"] = df["_implemento"] | m.str.contains(
+            r"GRADE|SULCAD|CALCARE|PLAINA|ROLO|\bIMP\b|REBOQUE|CARRETA|PLATAFORMA",
+            na=False, regex=True)
 
     for col in ("h_atual", "h_proxima_troca", "horas_restantes"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df["_sem_horimetro"] = df["h_atual"].isna() | df["h_proxima_troca"].isna() | df["horas_restantes"].isna()
-    df["_monitoravel"] = ~df["_implemento"] & ~df["_sem_horimetro"]
+    df["_monitoravel"] = ~df["_implemento"] & ~df["_terceiro"] & ~df["_sem_horimetro"]
+    return df
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_lub_painel(_c):
+    """Camada painel: vw_painel_lub_status (classificacao + monitoravel no SQL)."""
+    df = sb("vw_painel_lub_status", order_col="data_ref", desc=True)
+    if df.empty:
+        return df
+    df = df.copy()
+    df["vehicle"] = df["id_frota"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    for col in ("h_atual", "h_proxima_troca", "horas_restantes"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "status_troca" in df.columns:
+        df.loc[df["status_troca"] == "SEM_HORIMETRO", "status_troca"] = pd.NA
+    df["h_na_troca"] = pd.NA
+    df["_fonte"] = df["fonte_horimetro"].fillna("vw_painel_lub_status") if "fonte_horimetro" in df.columns else "vw_painel_lub_status"
     return df
 
 
@@ -461,17 +580,25 @@ def load_lub_gestor(_c):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_lub(_c):
+    df = load_lub_painel(_c)
+    if not df.empty:
+        return df
     return load_lub_gestor(_c)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_fin_lub(_c):
-    df = sb("financeiro_lubrificacao", order_col="criado_em", desc=True)
+    df = sb("vw_painel_lub_fin", order_col="criado_em", desc=True)
+    if df.empty:
+        df = sb("financeiro_lubrificacao", order_col="criado_em", desc=True)
     if df.empty:
         return df
+    df = df.copy()
     df["custo_total"] = pd.to_numeric(df["custo_total"], errors="coerce").fillna(0)
-    if "criado_em" in df.columns:
+    if "mes_key" not in df.columns and "criado_em" in df.columns:
         df["mes_key"] = parse_mes_key(parse_dt(df["criado_em"]))
+    elif "mes_key" in df.columns:
+        df["mes_key"] = parse_mes_key(df["mes_key"])
     return df
 
 
@@ -561,7 +688,9 @@ def load_operadores(_c):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_abast(_c):
-    df = sb("vw_abastecimento_consolidado", order_col="created_at", desc=True)
+    df = sb("vw_painel_abastecimento", order_col="created_at", desc=True)
+    if df.empty:
+        df = sb("vw_abastecimento_consolidado", order_col="created_at", desc=True)
     if df.empty:
         return df
     df["dt"] = parse_dt(df["created_at"])
@@ -573,11 +702,23 @@ def load_abast(_c):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_transf(_c):
-    df = sb("combustivel_transferencia")
+    df = sb("vw_painel_transferencias")
+    if df.empty:
+        df = sb("combustivel_transferencia")
     if df.empty:
         return df
     df["data"] = pd.to_datetime(df["data"], errors="coerce")
     df["quantidade_l"] = pd.to_numeric(df["quantidade_l"], errors="coerce").fillna(0)
+    return df
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_frota_painel(_c):
+    df = sb("dim_frota_painel")
+    if df.empty:
+        return df
+    df = df.copy()
+    df["id_frota"] = df["id_frota"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
     return df
 
 
@@ -709,7 +850,7 @@ with h2:
         '<div style="font-size:22px;font-weight:700;color:#e8edd0;letter-spacing:1px;">'
         'GESTOR DA OFICINA — SANTA VERGÍNIA</div>'
         '<div style="font-size:11px;color:#8aab80;letter-spacing:2px;margin-top:2px;">'
-        'OS · Lubrificação · Borracharia · Comboio · Disponibilidade</div></div>',
+        'OS · Lubrificação · Borracharia · Comboio · Disponibilidade · Camada Painel</div></div>',
         unsafe_allow_html=True,
     )
 with h3:
@@ -734,6 +875,7 @@ df_transf = load_transf(conn)
 df_disp = load_disp(conn)
 df_horas = load_horas_frota(conn, mes_atual_str)
 df_frota = load_frota(conn)
+df_painel = load_frota_painel(conn)
 df_fin = load_financeiro(conn)
 df_fin_lanc = load_fin_lanc(conn)
 df_colab = load_colab(conn)
@@ -903,11 +1045,11 @@ with tab2:
     st.markdown('<div class="sec">Lubrificação — painel analítico</div>', unsafe_allow_html=True)
 
     if df_lub.empty:
-        st.info("Sem dados de lubrificação (lubrificacao_v3).")
+        st.info("Sem dados de lubrificação (vw_painel_lub_status).")
     else:
         fonte = df_lub["_fonte"].iloc[0] if "_fonte" in df_lub.columns else "—"
         col_frota = "vehicle" if "vehicle" in df_lub.columns else "frota"
-        df_lub_e = enriquecer_lub(df_lub, df_frota)
+        df_lub_e = enriquecer_lub(df_lub, df_frota, df_painel)
         df_mon = df_lub_e[df_lub_e["_monitoravel"]].copy()
         df_excl = df_lub_e[~df_lub_e["_monitoravel"]].copy()
 
@@ -993,6 +1135,8 @@ with tab2:
                 dx["Motivo"] = df_excl.apply(
                     lambda r: "Implemento (sem horímetro de troca)"
                     if r["_implemento"]
+                    else "Frota de terceiros"
+                    if r.get("_terceiro")
                     else "Sem horímetro válido",
                     axis=1,
                 )
@@ -1022,10 +1166,10 @@ with tab2:
         dark_table(dt, height=380)
 
     st.divider()
-    st.markdown('<div class="sec">Custos lubrificação — financeiro_lubrificacao</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">Custos lubrificação — vw_painel_lub_fin</div>', unsafe_allow_html=True)
 
     if df_fin_lub.empty or "mes_key" not in df_fin_lub.columns:
-        st.info("Sem lançamentos em financeiro_lubrificacao.")
+        st.info("Sem lançamentos em vw_painel_lub_fin.")
     else:
         meses_lub = meses_disponiveis(df_fin_lub["mes_key"], mes_atual_str, n=8)
         idx_lub = meses_lub.index(mes_atual_str) if mes_atual_str in meses_lub else 0
@@ -1303,7 +1447,7 @@ with tab4:
             dmes_raw = pd.DataFrame()
             fonte = ""
 
-        dmes = filtrar_tratores(dmes_raw, df_frota)
+        dmes = filtrar_tratores(dmes_raw, df_frota, df_painel)
         if not dmes.empty:
             dmes["label"] = dmes.apply(label_trator, axis=1)
         excluidos = len(dmes_raw) - len(dmes)
@@ -1588,7 +1732,7 @@ with tab5:
                 _dfp["_mec"] = sem_acento(_dfp["mecanico"])
                 _dfp["_c_mec"] = _dfp["_h"] * _dfp["_mec"].map(busca_ch)
                 # Implemento acoplado: sem custo de operador (operador no trator)
-                _cat_map = mapa_categoria_frota(df_frota)
+                _cat_map = mapa_categoria_frota(df_frota, df_painel)
                 _frotas_apont = set()
                 if not df_apont.empty and "frota" in df_apont.columns:
                     _frotas_apont = set(
@@ -1599,6 +1743,8 @@ with tab5:
                     if f in _frotas_apont:
                         return False
                     meta = _cat_map.get(f) or {}
+                    if eh_terceiro(meta.get("categoria", ""), meta.get("modelo", ""), f):
+                        return True
                     return eh_implemento(meta.get("categoria", ""), meta.get("modelo", ""))
                 _dfp["_impl"] = _dfp["id_frota"].astype(str).str.strip().str.replace(
                     r"\.0$", "", regex=True).map(_eh_impl_frota)
