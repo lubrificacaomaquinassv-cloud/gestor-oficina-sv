@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # Conferir no site apos publicar: deve aparecer este codigo no canto superior direito
-PAINEL_BUILD = "2026-06-13-camada2g"
+PAINEL_BUILD = "2026-06-13-camada2h"
 
 st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
 
@@ -1902,30 +1902,26 @@ with tab5:
                     dff["_fid"] = norm_frota_id(dff["id_frota"])
                     r = (
                         dff.groupby("_fid", as_index=False)["valor"].sum()
-                        .sort_values("valor", ascending=True)
-                        .tail(10)
+                        .sort_values("valor", ascending=False)
+                        .head(10)
                     )
-                    r["frota"] = r["_fid"].astype(str)
-                    fig = go.Figure(go.Bar(
-                        y=r["frota"], x=r["valor"], orientation="h",
-                        marker_color="#2980b9",
-                        text=r["valor"].apply(fmtR), textposition="inside",
-                        insidetextanchor="end",
-                        textfont=dict(color="#ffffff", size=11),
-                        hovertemplate="Frota %{y}<br>R$ %{x:,.2f}<extra></extra>",
-                    ))
-                    fig.update_layout(
-                        **PDARK,
-                        height=max(160, len(r) * 44 + 60),
-                        xaxis={**PLOT_AXIS, "title": "R$"},
-                        yaxis={
-                            **PLOT_AXIS,
-                            "type": "category",
-                            "categoryorder": "total ascending",
-                            "tickfont": dict(color="#e8edd0", size=12),
-                        },
-                    )
-                    st.plotly_chart(fig, use_container_width=True, key="k_fin_frota")
+                    tot_frota = dfl["valor"].sum()
+                    if r.empty:
+                        st.info("Sem custo por frota neste mês.")
+                    else:
+                        t_frota = pd.DataFrame({
+                            "#": range(1, len(r) + 1),
+                            "Frota": r["_fid"].astype(str),
+                            "Valor": r["valor"].apply(fmtR),
+                            "% Mês": r["valor"].apply(
+                                lambda v: f"{v / tot_frota * 100:.1f}%" if tot_frota > 0 else "—"
+                            ),
+                        })
+                        dark_table(t_frota, height=max(220, len(t_frota) * 38 + 48))
+                        st.caption(
+                            "Valores somados de NF-e/lançamentos no mês. "
+                            "Outliers (ex.: uma OS grande) aparecem inteiros na tabela."
+                        )
 
             st.markdown(f'<div class="sec">Custo da parada — hora mecânico + hora operador · {mes_fin_sel}</div>', unsafe_allow_html=True)
             df_os_fin = df_os[df_os["mes_os"].astype(str) == mes_fin_sel].copy() if not df_os.empty else pd.DataFrame()
