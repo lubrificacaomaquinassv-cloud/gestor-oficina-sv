@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # Conferir no site apos publicar: deve aparecer este codigo no canto superior direito
-PAINEL_BUILD = "2026-06-13-camada2e"
+PAINEL_BUILD = "2026-06-13-camada2f"
 
 st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
 
@@ -796,6 +796,88 @@ def load_operadores(_c):
     return df.drop_duplicates(subset=["id_frota"], keep="first")
 
 
+def mapa_busca_custo_hora(df_colab):
+    """Retorna funcao nome -> custo_hora (dim_colaborador)."""
+    if df_colab is None or df_colab.empty:
+        return lambda _n: 0.0
+    _ch = df_colab.set_index("_nome")["custo_hora"]
+    _ch_fl = {}
+    for _n, _v in _ch.items():
+        _ts = str(_n).split()
+        if len(_ts) >= 2:
+            _k = (_ts[0], _ts[-1])
+            _ch_fl[_k] = None if _k in _ch_fl else float(_v)
+
+    def busca_ch(nome):
+        nome = str(nome or "").strip()
+        if not nome:
+            return 0.0
+        if nome in _ch.index:
+            return float(_ch[nome])
+        _ts = nome.split()
+        if len(_ts) >= 2:
+            _v = _ch_fl.get((_ts[0], _ts[-1]))
+            if _v is not None:
+                return _v
+        if len(_ts) == 1:
+            _pre = _ts[0]
+            hits = [n for n in _ch.index if n == _pre or n.startswith(_pre + " ")]
+            if len(hits) == 1:
+                return float(_ch[hits[0]])
+        return 0.0
+
+    return busca_ch
+
+
+def calc_parada_os(df_os, df_colab, df_apont, df_oper, df_frota, df_painel):
+    """Tempo parada + operador + custo (mecanico + operador) por OS."""
+    if df_os.empty:
+        return df_os
+    busca_ch = mapa_busca_custo_hora(df_colab)
+    out = df_os.copy()
+    out["_h"] = pd.to_numeric(out["tempo_min"], errors="coerce").fillna(0) / 60.0
+    out["_mec"] = sem_acento(out["mecanico"]) if "mecanico" in out.columns else ""
+    out["_c_mec"] = out["_h"] * out["_mec"].map(busca_ch)
+
+    _cat_map = mapa_categoria_frota(df_frota, df_painel)
+    _frotas_apont = set()
+    if df_apont is not None and not df_apont.empty and "frota" in df_apont.columns:
+        _frotas_apont = set(df_apont["frota"].astype(str).str.strip())
+
+    def _eh_impl_frota(f):
+        f = str(f).strip()
+        if f in _frotas_apont:
+            return False
+        meta = _cat_map.get(f) or {}
+        if eh_terceiro(meta.get("categoria", ""), meta.get("modelo", ""), f):
+            return True
+        return eh_implemento(meta.get("categoria", ""), meta.get("modelo", ""))
+
+    out["_impl"] = out["id_frota"].astype(str).str.strip().str.replace(
+        r"\.0$", "", regex=True).map(_eh_impl_frota)
+
+    out["_oper"] = ""
+    if "operador" in out.columns:
+        out["_oper"] = sem_acento(out["operador"])
+        out.loc[out["_oper"].isin(["NAN", "NONE", "<NA>", "NULL", "N/A", "-"]), "_oper"] = ""
+    if df_apont is not None and not df_apont.empty and out["_oper"].eq("").any():
+        for _i in out.index[out["_oper"].eq("") & ~out["_impl"]]:
+            _op = operador_apontamento(out.at[_i, "id_frota"], out.at[_i, "data_os"], df_apont)
+            if _op:
+                out.at[_i, "_oper"] = _op
+    if df_oper is not None and not df_oper.empty:
+        _fmap = df_oper.set_index("id_frota")["operador"]
+        _falta = out["_oper"].eq("") & ~out["_impl"]
+        out.loc[_falta, "_oper"] = (
+            norm_frota_id(out.loc[_falta, "id_frota"]).map(_fmap).fillna(""))
+    out["_oper"] = sem_acento(out["_oper"])
+    out.loc[out["_impl"], "_oper"] = ""
+    out["_c_op"] = out["_h"] * out["_oper"].map(busca_ch)
+    out.loc[out["_impl"], "_c_op"] = 0.0
+    out["_c_tot"] = out["_c_mec"] + out["_c_op"]
+    return out
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def load_abast(_c):
     df = sb("vw_painel_abastecimento", order_col="created_at", desc=True)
@@ -1065,12 +1147,6 @@ with tab1:
         st.caption(f"{len(df_mes_sel)} OS em {mes_sel_label}")
 
         if not df_mes_sel.empty:
-            fin_mes = financeiro_do_mes(df_fin, df_mes_sel, mes_sel_label)
-            res_fin = resumo_financeiro_os(fin_mes)
-
-            if not res_fin.empty:
-                pass  # KPIs do financeiro_os movidos para a aba Financeiro
-
             col_r1, col_r2 = st.columns(2)
             with col_r1:
                 st.markdown(
@@ -1135,18 +1211,24 @@ with tab1:
             )
             cols_t = ["numero_os", "id_frota", "sistema", "tipo_manutencao", "status", "mecanico", "dt_fmt"]
             df_t = df_mes_sel[cols_t].copy()
-            if not res_fin.empty:
-                df_t = df_t.merge(
-                    res_fin[["numero_os", "pecas", "custo_mo", "total"]],
-                    on="numero_os", how="left",
-                )
-                df_t["pecas"] = df_t["pecas"].fillna(0).apply(fmtR)
-                df_t["custo_mo"] = df_t["custo_mo"].fillna(0).apply(fmtR)
-                df_t["total"] = df_t["total"].fillna(0).apply(fmtR)
-                names = ["OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora", "Peças", "MO", "Total"]
-            else:
-                names = ["OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora"]
+            dfp = calc_parada_os(df_mes_sel, df_colab, df_apont, df_oper, df_frota, df_painel)
+            df_t["parada"] = dfp["_h"].apply(
+                lambda v: f"{v * 60:.0f} min ({v:.1f}h)" if v > 0 else "—")
+            df_t["operador"] = dfp.apply(
+                lambda r: "N/A — implemento" if r.get("_impl") else (
+                    r["_oper"] if r.get("_oper") else "—"),
+                axis=1,
+            )
+            names = ["OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora", "Parada", "Operador"]
+            if not df_colab.empty:
+                df_t["custo_parada"] = dfp["_c_tot"].apply(lambda v: fmtR(v) if v > 0 else "—")
+                names.append("Custo parada")
             df_t.columns = names
+            st.caption(
+                "Parada e operador vêm da OS/apontamento. "
+                "Custo parada = tempo × custo_hora (detalhe na aba Financeiro). "
+                "Peças/NF-e ficam em Financeiro → Lançamentos."
+            )
             dark_table(df_t, height=420)
 
 # ══════════════════════════════════════════════════════════════
@@ -1841,73 +1923,7 @@ with tab5:
             elif df_colab.empty:
                 st.info("Cadastre o custo_hora na dim_colaborador para calcular o custo da parada.")
             else:
-                _ch = df_colab.set_index("_nome")["custo_hora"]
-                # Busca por nome completo e, se não achar, por primeiro+último nome
-                _ch_fl = {}
-                for _n, _v in _ch.items():
-                    _ts = str(_n).split()
-                    if len(_ts) >= 2:
-                        _k = (_ts[0], _ts[-1])
-                        _ch_fl[_k] = None if _k in _ch_fl else float(_v)
-                def busca_ch(nome):
-                    nome = str(nome or "").strip()
-                    if not nome:
-                        return 0.0
-                    if nome in _ch.index:
-                        return float(_ch[nome])
-                    _ts = nome.split()
-                    if len(_ts) >= 2:
-                        _v = _ch_fl.get((_ts[0], _ts[-1]))
-                        if _v is not None:
-                            return _v
-                    if len(_ts) == 1:
-                        _pre = _ts[0]
-                        hits = [n for n in _ch.index if n == _pre or n.startswith(_pre + " ")]
-                        if len(hits) == 1:
-                            return float(_ch[hits[0]])
-                    return 0.0
-                _dfp = df_os_fin.copy()
-                _dfp["_h"] = pd.to_numeric(_dfp["tempo_min"], errors="coerce").fillna(0) / 60.0
-                _dfp["_mec"] = sem_acento(_dfp["mecanico"])
-                _dfp["_c_mec"] = _dfp["_h"] * _dfp["_mec"].map(busca_ch)
-                # Implemento acoplado: sem custo de operador (operador no trator)
-                _cat_map = mapa_categoria_frota(df_frota, df_painel)
-                _frotas_apont = set()
-                if not df_apont.empty and "frota" in df_apont.columns:
-                    _frotas_apont = set(
-                        df_apont["frota"].astype(str).str.strip().str.replace(
-                            r"\.0$", "", regex=True))
-                def _eh_impl_frota(f):
-                    f = str(f).strip()
-                    if f in _frotas_apont:
-                        return False
-                    meta = _cat_map.get(f) or {}
-                    if eh_terceiro(meta.get("categoria", ""), meta.get("modelo", ""), f):
-                        return True
-                    return eh_implemento(meta.get("categoria", ""), meta.get("modelo", ""))
-                _dfp["_impl"] = _dfp["id_frota"].astype(str).str.strip().str.replace(
-                    r"\.0$", "", regex=True).map(_eh_impl_frota)
-                # Operador: 1º na OS; 2º apontamento_campo ate a data da OS; 3º dim_operador_frota
-                _dfp["_oper"] = ""
-                if "operador" in _dfp.columns:
-                    _dfp["_oper"] = sem_acento(_dfp["operador"])
-                    _dfp.loc[_dfp["_oper"].isin(["NAN", "NONE", "<NA>", "NULL", "N/A", "-"]), "_oper"] = ""
-                if not df_apont.empty and _dfp["_oper"].eq("").any():
-                    for _i in _dfp.index[_dfp["_oper"].eq("") & ~_dfp["_impl"]]:
-                        _op = operador_apontamento(
-                            _dfp.at[_i, "id_frota"], _dfp.at[_i, "data_os"], df_apont)
-                        if _op:
-                            _dfp.at[_i, "_oper"] = _op
-                if not df_oper.empty:
-                    _fmap = df_oper.set_index("id_frota")["operador"]
-                    _falta = _dfp["_oper"].eq("") & ~_dfp["_impl"]
-                    _dfp.loc[_falta, "_oper"] = (
-                        norm_frota_id(_dfp.loc[_falta, "id_frota"]).map(_fmap).fillna(""))
-                _dfp["_oper"] = sem_acento(_dfp["_oper"])
-                _dfp.loc[_dfp["_impl"], "_oper"] = ""
-                _dfp["_c_op"] = _dfp["_h"] * _dfp["_oper"].map(busca_ch)
-                _dfp.loc[_dfp["_impl"], "_c_op"] = 0.0
-                _dfp["_c_tot"] = _dfp["_c_mec"] + _dfp["_c_op"]
+                _dfp = calc_parada_os(df_os_fin, df_colab, df_apont, df_oper, df_frota, df_painel)
 
                 p1, p2, p3, p4 = st.columns(4)
                 p1.metric("⏱ Horas Paradas", f"{fmt(_dfp['_h'].sum(), 1)}h",
