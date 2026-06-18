@@ -3,7 +3,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-# Conferir no site apos publicar: deve aparecer este codigo no canto superior direito
+from sigcf_auth import logo_html, LOGO_FRAME_CSS
+
 PAINEL_BUILD = "2026-06-13-camada2h"
 
 st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
@@ -21,6 +22,7 @@ h1,h2,h3,p,span,label{color:#e8edd0;}
 .sec{font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:700;
      letter-spacing:2px;text-transform:uppercase;color:#8aab80;
      border-left:4px solid #4a9e3f;padding-left:10px;margin:18px 0 10px;}
+""" + LOGO_FRAME_CSS + """
 .stTabs [data-baseweb="tab-list"]{background:#111c10;border-bottom:2px solid #1e2e1c;gap:0;}
 .stTabs [data-baseweb="tab"]{color:#4a6644;font-family:'Barlow Condensed',sans-serif;
      font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
@@ -1033,9 +1035,9 @@ def resumo_financeiro_os(df_fin):
 
 
 # ── HEADER ────────────────────────────────────────────────────
-h1, h2, h3 = st.columns([1, 8, 2])
+h1, h2, h3 = st.columns([1.1, 8, 2])
 with h1:
-    st.image("https://raw.githubusercontent.com/lubrificacaomaquinassv-cloud/painel-frota-sv/main/icons/logo_sv.png", width=92)
+    st.markdown(logo_html(118), unsafe_allow_html=True)
 with h2:
     st.markdown(
         '<div style="font-family:Barlow Condensed,sans-serif;">'
