@@ -3,11 +3,11 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-from sigcf_auth import logo_html, LOGO_FRAME_CSS
+st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
+
+from sigcf_auth import logo_html
 
 PAINEL_BUILD = "2026-06-13-camada2h"
-
-st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
 
 st.markdown("""
 <style>
@@ -22,7 +22,9 @@ h1,h2,h3,p,span,label{color:#e8edd0;}
 .sec{font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:700;
      letter-spacing:2px;text-transform:uppercase;color:#8aab80;
      border-left:4px solid #4a9e3f;padding-left:10px;margin:18px 0 10px;}
-""" + LOGO_FRAME_CSS + """
+.logo-frame{background:linear-gradient(145deg,#0a1628,#0d2040);border:2px solid #c9a227;
+ border-radius:12px;padding:5px;display:inline-block;box-shadow:0 4px 18px rgba(0,0,0,.45);}
+.logo-frame img{display:block;border-radius:8px;}
 .stTabs [data-baseweb="tab-list"]{background:#111c10;border-bottom:2px solid #1e2e1c;gap:0;}
 .stTabs [data-baseweb="tab"]{color:#4a6644;font-family:'Barlow Condensed',sans-serif;
      font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
