@@ -34,9 +34,19 @@ div[data-testid="metric-container"]{background:#111c10;border:1px solid #1e2e1c;
 div[data-testid="metric-container"] label{color:#8aab80!important;font-size:11px!important;}
 div[data-testid="metric-container"] [data-testid="stMetricValue"]{color:#e8edd0!important;}
 div[data-testid="metric-container"] [data-testid="stMetricDelta"]{color:#8aab80!important;}
-div[data-testid="stSelectbox"] label{color:#8aab80!important;}
-div[data-testid="stSelectbox"] > div{background:#111c10!important;border:1px solid #1e2e1c!important;color:#e8edd0!important;}
-div[data-testid="stSelectbox"] div[data-baseweb="select"] > div{color:#e8edd0!important;}
+div[data-testid="stSelectbox"] label{color:#c9a227!important;font-weight:700!important;
+ letter-spacing:0.5px!important;}
+div[data-testid="stSelectbox"] > div{background:transparent!important;border:none!important;}
+div[data-baseweb="select"] > div{
+ background:#dce6d2!important;border:2px solid #c9a227!important;
+ color:#1a2818!important;border-radius:8px!important;
+ box-shadow:0 2px 12px rgba(201,162,39,.25)!important;}
+div[data-testid="stSelectbox"] div[data-baseweb="select"] > div{color:#1a2818!important;font-weight:600!important;}
+div[data-baseweb="select"] div{color:#1a2818!important;}
+div[data-baseweb="select"] svg{fill:#4a6644!important;}
+ul[data-testid="stSelectboxVirtualDropdown"],
+div[data-baseweb="popover"] ul{background:#e8edd0!important;}
+div[data-baseweb="popover"] li{color:#1a2818!important;}
 .stButton button{background:#4a9e3f!important;color:#ffffff!important;border:1px solid #6fcf60!important;
  font-family:'Barlow Condensed',sans-serif;font-weight:700;letter-spacing:1px;text-transform:uppercase;border-radius:8px;}
 .stButton button:hover{background:#3d8534!important;border-color:#9fe790!important;}
