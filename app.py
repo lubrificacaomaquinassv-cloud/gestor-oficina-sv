@@ -842,6 +842,8 @@ with tab1:
 
         st.caption(f"{len(df_mes_sel)} OS em {mes_sel_label}")
 
+        custos_os = pd.DataFrame()
+        res_fin = pd.DataFrame()
         if not df_mes_sel.empty:
             fin_mes = financeiro_do_mes(df_fin, df_mes_sel, mes_sel_label)
             res_fin = resumo_financeiro_os(fin_mes)
@@ -929,30 +931,39 @@ with tab1:
                 f'<div class="sec">Lista de OS — {mes_sel_label}</div>',
                 unsafe_allow_html=True,
             )
-            cols_t = ["numero_os", "id_frota", "sistema", "tipo_manutencao", "status", "mecanico", "dt_fmt"]
-            df_t = df_mes_sel[cols_t].copy()
+            cols_t = [c for c in [
+                "numero_os", "id_frota", "sistema", "tipo_manutencao", "status", "mecanico", "dt_fmt",
+            ] if c in df_mes_sel.columns]
+            df_t = df_mes_sel.drop_duplicates(subset=["numero_os"], keep="first")[cols_t].copy()
             if not custos_os.empty:
                 df_t = df_t.merge(custos_os, on="numero_os", how="left")
                 if not res_fin.empty:
-                    df_t = df_t.merge(res_fin[["numero_os", "pecas"]], on="numero_os", how="left")
+                    pecas_os = res_fin[["numero_os", "pecas"]].drop_duplicates(subset=["numero_os"], keep="first")
+                    df_t = df_t.merge(pecas_os, on="numero_os", how="left")
                 else:
-                    df_t["pecas"] = 0
-                df_t["pecas"] = pd.to_numeric(df_t.get("pecas", 0), errors="coerce").fillna(0)
-                df_t["custo_mec"] = pd.to_numeric(df_t["custo_mec"], errors="coerce").fillna(0)
-                df_t["custo_op"] = pd.to_numeric(df_t["custo_op"], errors="coerce").fillna(0)
-                df_t["custo_parada"] = pd.to_numeric(df_t["custo_parada"], errors="coerce").fillna(0)
+                    df_t["pecas"] = 0.0
+                for col in ("pecas", "custo_mec", "custo_op", "custo_parada"):
+                    df_t[col] = pd.to_numeric(df_t.get(col, 0), errors="coerce").fillna(0)
                 df_t["total"] = df_t["pecas"] + df_t["custo_parada"]
+                df_t = df_t[[*cols_t, "pecas", "custo_mec", "custo_op", "total"]]
                 df_t["pecas"] = df_t["pecas"].apply(fmtR)
                 df_t["custo_mec"] = df_t["custo_mec"].apply(fmtR)
                 df_t["custo_op"] = df_t["custo_op"].apply(fmtR)
                 df_t["total"] = df_t["total"].apply(fmtR)
-                names = [
-                    "OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora",
-                    "Peças", "R$ Mecânico", "R$ Operador", "Total Parada",
-                ]
-            else:
-                names = ["OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora"]
-            df_t.columns = names
+            rename = {
+                "numero_os": "OS",
+                "id_frota": "Frota",
+                "sistema": "Sistema",
+                "tipo_manutencao": "Tipo",
+                "status": "Status",
+                "mecanico": "Mecânico",
+                "dt_fmt": "Data/Hora",
+                "pecas": "Peças",
+                "custo_mec": "R$ Mecânico",
+                "custo_op": "R$ Operador",
+                "total": "Total",
+            }
+            df_t.columns = [rename.get(c, c) for c in df_t.columns]
             dark_table(df_t, height=420)
 
 # ══════════════════════════════════════════════════════════════
