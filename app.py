@@ -449,7 +449,7 @@ def load_transf(_c):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_frota(_c):
-    for table in ("frota", "cadastro_frota", "equipamentos", "vw_frota"):
+    for table in ("dim_frota", "frota", "cadastro_frota", "equipamentos", "vw_frota"):
         try:
             df = sb(table)
             if not df.empty:
@@ -457,6 +457,171 @@ def load_frota(_c):
         except Exception:
             continue
     return pd.DataFrame()
+
+
+def sem_acento(s):
+    import unicodedata
+
+    def _norm(x):
+        x = "" if x is None else str(x)
+        x = unicodedata.normalize("NFKD", x)
+        x = x.encode("ascii", "ignore").decode("ascii")
+        return x.strip().upper()
+
+    return s.map(_norm)
+
+
+def norm_frota_id(s):
+    return s.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+
+
+def operador_apontamento(frota, data_os, df_apont):
+    if df_apont is None or df_apont.empty:
+        return ""
+    fid = norm_frota_id(pd.Series([frota])).iloc[0]
+    cand = df_apont[df_apont["frota"] == fid].sort_values("data")
+    if cand.empty:
+        return ""
+    if pd.notna(data_os):
+        ate = cand[cand["data"] <= data_os]
+        return str(ate.iloc[-1]["operador"]) if not ate.empty else ""
+    return str(cand.iloc[-1]["operador"])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_colab(_c):
+    df = sb("dim_colaborador")
+    if df.empty:
+        return df
+    df = df.copy()
+    df["_nome"] = sem_acento(df["nome"])
+    df["custo_hora"] = pd.to_numeric(df["custo_hora"], errors="coerce").fillna(0)
+    return df[df["custo_hora"] > 0].drop_duplicates(subset=["_nome"], keep="first")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_operadores(_c):
+    df = sb("dim_operador_frota")
+    if df.empty:
+        return df
+    df = df.copy()
+    if "ativo" in df.columns:
+        df = df[df["ativo"].astype(str).str.upper().isin(["TRUE", "1", "SIM", "S"])]
+    df["id_frota"] = norm_frota_id(df["id_frota"])
+    df["operador"] = sem_acento(df["operador"])
+    return df.drop_duplicates(subset=["id_frota"], keep="first")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_apont(_c):
+    df = sb("apontamento_campo")
+    if df.empty:
+        return df
+    df = df.copy()
+    df["data"] = pd.to_datetime(df["data"], errors="coerce").dt.date
+    df["frota"] = norm_frota_id(df["frota"])
+    df["operador"] = sem_acento(df["operador"])
+    return df.dropna(subset=["data"]).sort_values("data")
+
+
+def busca_custo_hora(df_colab):
+    if df_colab.empty:
+        return lambda _nome: 0.0
+    ch = df_colab.set_index("_nome")["custo_hora"]
+    ch_fl = {}
+    for nome, val in ch.items():
+        partes = str(nome).split()
+        if len(partes) >= 2:
+            ch_fl.setdefault((partes[0], partes[-1]), float(val))
+
+    def busca(nome):
+        nome = str(nome or "").strip()
+        if not nome:
+            return 0.0
+        if nome in ch.index:
+            return float(ch[nome])
+        partes = nome.split()
+        if len(partes) >= 2:
+            val = ch_fl.get((partes[0], partes[-1]))
+            if val is not None:
+                return val
+        if len(partes) == 1:
+            hits = [n for n in ch.index if n == partes[0] or n.startswith(partes[0] + " ")]
+            if len(hits) == 1:
+                return float(ch[hits[0]])
+        return 0.0
+
+    return busca
+
+
+def eh_implemento_os(id_frota, df_frota):
+    if df_frota is None or df_frota.empty:
+        return False
+    col = "id_frota" if "id_frota" in df_frota.columns else "frota"
+    cat_col = next(
+        (c for c in df_frota.columns if c.lower() in ("categoria", "tipo", "tipo_equipamento")),
+        None,
+    )
+    fid = str(id_frota).strip()
+    row = df_frota[df_frota[col].astype(str).str.strip().str.replace(r"\.0$", "", regex=True) == fid]
+    if row.empty:
+        return False
+    cat = str(row.iloc[0].get(cat_col, "") if cat_col else "").upper()
+    mod = str(row.iloc[0].get("modelo", "")).upper()
+    if any(x in cat for x in ("IMPLEMENTO", "REBOQUE", "CARRETA", "PLATAFORMA")):
+        return True
+    return any(x in mod for x in ("GRADE", "SULCAD", "REBOQUE", "CARRETA", "PLATAFORMA", "IMPLEMENTO"))
+
+
+def calcular_custos_os(df_os_mes, df_colab, df_oper, df_apont, df_frota):
+    """MO mecânico + operador parado: tempo da OS × custo_hora (dim_colaborador)."""
+    if df_os_mes.empty:
+        return pd.DataFrame()
+    busca = busca_custo_hora(df_colab)
+    out = df_os_mes.copy()
+    out["_h"] = pd.to_numeric(out["tempo_min"], errors="coerce").fillna(0) / 60.0
+    out["custo_mec"] = out["_h"] * sem_acento(out["mecanico"]).map(busca)
+
+    out["_oper"] = ""
+    if "operador" in out.columns:
+        out["_oper"] = sem_acento(out["operador"])
+        out.loc[out["_oper"].isin(["NAN", "NONE", "<NA>", "NULL", "N/A", "-", ""]), "_oper"] = ""
+    if not df_apont.empty:
+        for idx in out.index[out["_oper"].eq("")]:
+            op = operador_apontamento(out.at[idx, "id_frota"], out.at[idx, "data_os"], df_apont)
+            if op:
+                out.at[idx, "_oper"] = op
+    if not df_oper.empty:
+        fmap = df_oper.set_index("id_frota")["operador"]
+        falta = out["_oper"].eq("")
+        out.loc[falta, "_oper"] = norm_frota_id(out.loc[falta, "id_frota"]).map(fmap).fillna("")
+        out["_oper"] = sem_acento(out["_oper"])
+
+    out["_impl"] = out["id_frota"].astype(str).str.strip().map(lambda f: eh_implemento_os(f, df_frota))
+    out.loc[out["_impl"], "_oper"] = ""
+    out["custo_op"] = out["_h"] * out["_oper"].map(busca)
+    out.loc[out["_impl"], "custo_op"] = 0.0
+    out["custo_parada"] = out["custo_mec"] + out["custo_op"]
+    return out[["numero_os", "custo_mec", "custo_op", "custo_parada"]]
+
+
+def contagem_os_frota(df_os, mes_label):
+    if df_os.empty:
+        return {}
+    mes = pd.Period(mes_label, freq="M")
+    sub = df_os[df_os["mes_os"] == mes].copy()
+    sub["_f"] = norm_frota_id(sub["id_frota"])
+    return sub.groupby("_f")["numero_os"].nunique().to_dict()
+
+
+def dias_apont_frota(df_apont, mes_label):
+    if df_apont.empty:
+        return {}
+    mes = pd.Period(mes_label, freq="M")
+    sub = df_apont.copy()
+    sub["mes"] = pd.to_datetime(sub["data"]).dt.to_period("M")
+    sub = sub[sub["mes"] == mes]
+    return sub.groupby("frota")["data"].nunique().to_dict()
 
 
 def fmt(n, dec=0):
@@ -602,6 +767,9 @@ df_horas = load_horas_frota(conn, mes_atual_str)
 df_frota = load_frota(conn)
 df_fin = load_financeiro(conn)
 df_fin_lanc = load_fin_lanc(conn)
+df_colab = load_colab(conn)
+df_oper = load_operadores(conn)
+df_apont = load_apont(conn)
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔧 Ordens de Serviço",
@@ -677,20 +845,27 @@ with tab1:
         if not df_mes_sel.empty:
             fin_mes = financeiro_do_mes(df_fin, df_mes_sel, mes_sel_label)
             res_fin = resumo_financeiro_os(fin_mes)
+            custos_os = calcular_custos_os(df_mes_sel, df_colab, df_oper, df_apont, df_frota)
 
-            if not res_fin.empty:
+            if not custos_os.empty:
                 st.markdown(
-                    f'<div class="sec">Custos do período — {mes_sel_label} · financeiro_os</div>',
+                    f'<div class="sec">Custos da parada — {mes_sel_label} · dim_colaborador</div>',
                     unsafe_allow_html=True,
                 )
-                kc1, kc2, kc3, kc4 = st.columns(4)
-                kc1.metric("🔩 Peças", fmtR(res_fin["pecas"].sum()))
-                kc2.metric("🔧 Mão de Obra", fmtR(res_fin["custo_mo"].sum()))
-                kc3.metric("💰 Total OS", fmtR(res_fin["total"].sum()))
-                kc4.metric("📋 OS c/ lançamento", len(res_fin))
-                os_so_mo = len(res_fin[res_fin["pecas"] == 0])
-                if os_so_mo:
-                    st.caption(f"{os_so_mo} OS somente com MO (sem peça aplicada)")
+                pecas_mes = res_fin["pecas"].sum() if not res_fin.empty else 0
+                kc1, kc2, kc3, kc4, kc5 = st.columns(5)
+                kc1.metric("🔧 MO Mecânico", fmtR(custos_os["custo_mec"].sum()))
+                kc2.metric("👨‍🌾 MO Operador", fmtR(custos_os["custo_op"].sum()))
+                kc3.metric("💸 Total Parada", fmtR(custos_os["custo_parada"].sum()))
+                kc4.metric("🔩 Peças (NF)", fmtR(pecas_mes))
+                kc5.metric("💰 Total Geral", fmtR(custos_os["custo_parada"].sum() + pecas_mes))
+                st.caption(
+                    "Parada = tempo da OS × custo_hora (dim_colaborador). "
+                    "Operador: OS → apontamento_campo → dim_operador_frota. "
+                    "Implementos acoplados: MO operador N/A."
+                )
+            elif df_colab.empty:
+                st.info("Cadastre custo_hora em dim_colaborador para calcular MO mecânico e operador parado.")
 
             col_r1, col_r2 = st.columns(2)
             with col_r1:
@@ -756,15 +931,25 @@ with tab1:
             )
             cols_t = ["numero_os", "id_frota", "sistema", "tipo_manutencao", "status", "mecanico", "dt_fmt"]
             df_t = df_mes_sel[cols_t].copy()
-            if not res_fin.empty:
-                df_t = df_t.merge(
-                    res_fin[["numero_os", "pecas", "custo_mo", "total"]],
-                    on="numero_os", how="left",
-                )
-                df_t["pecas"] = df_t["pecas"].fillna(0).apply(fmtR)
-                df_t["custo_mo"] = df_t["custo_mo"].fillna(0).apply(fmtR)
-                df_t["total"] = df_t["total"].fillna(0).apply(fmtR)
-                names = ["OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora", "Peças", "MO", "Total"]
+            if not custos_os.empty:
+                df_t = df_t.merge(custos_os, on="numero_os", how="left")
+                if not res_fin.empty:
+                    df_t = df_t.merge(res_fin[["numero_os", "pecas"]], on="numero_os", how="left")
+                else:
+                    df_t["pecas"] = 0
+                df_t["pecas"] = pd.to_numeric(df_t.get("pecas", 0), errors="coerce").fillna(0)
+                df_t["custo_mec"] = pd.to_numeric(df_t["custo_mec"], errors="coerce").fillna(0)
+                df_t["custo_op"] = pd.to_numeric(df_t["custo_op"], errors="coerce").fillna(0)
+                df_t["custo_parada"] = pd.to_numeric(df_t["custo_parada"], errors="coerce").fillna(0)
+                df_t["total"] = df_t["pecas"] + df_t["custo_parada"]
+                df_t["pecas"] = df_t["pecas"].apply(fmtR)
+                df_t["custo_mec"] = df_t["custo_mec"].apply(fmtR)
+                df_t["custo_op"] = df_t["custo_op"].apply(fmtR)
+                df_t["total"] = df_t["total"].apply(fmtR)
+                names = [
+                    "OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora",
+                    "Peças", "R$ Mecânico", "R$ Operador", "Total Parada",
+                ]
             else:
                 names = ["OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora"]
             df_t.columns = names
@@ -1002,6 +1187,14 @@ with tab4:
 
         dmes = filtrar_tratores(dmes_raw, df_frota)
         if not dmes.empty:
+            # Views inflam total_os (ex.: frota 3393 = 140 na view, 10 OS reais em jul/26)
+            os_map = contagem_os_frota(df_os, mes_d_sel)
+            dias_map = dias_apont_frota(df_apont, mes_d_sel)
+            dmes["_fkey"] = norm_frota_id(dmes["id_frota"])
+            dmes["total_os"] = dmes["_fkey"].map(lambda f: os_map.get(f, 0))
+            if dias_map:
+                dmes["dias_com_apontamento"] = dmes["_fkey"].map(lambda f: dias_map.get(f, 0))
+            dmes = dmes.drop(columns=["_fkey"], errors="ignore")
             dmes["label"] = dmes.apply(label_trator, axis=1)
         excluidos = len(dmes_raw) - len(dmes)
 
@@ -1016,7 +1209,10 @@ with tab4:
         else:
             mlabel = mes_d_sel
             if mes_d_sel == mes_atual_str:
-                st.caption(f"Fonte: {fonte} · dados atualizados em tempo real")
+                st.caption(
+                    f"Fonte: {fonte} · OS no mês = contagem real em ordem_servico "
+                    f"(view superestima total_os)"
+                )
             dm = dmes["disponibilidade_pct"].mean()
             ht = dmes["horas_trabalhadas"].sum()
             hp = dmes["horas_parada"].sum()
