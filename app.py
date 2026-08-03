@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-PAINEL_BUILD = "2026-08-03-padronizacao-007"
+PAINEL_BUILD = "2026-08-03-saldo-comboio-ciclo"
 INTERVALO_LUB_PADRAO = 300.0
 
 st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
@@ -577,6 +577,17 @@ def load_transf(_c):
 
 
 @st.cache_data(ttl=120, show_spinner=False)
+def load_saldo_comboio(_c):
+    df = sb("vw_saldo_comboio")
+    if df.empty:
+        return df
+    for col in ("total_entrada_l", "total_saida_l", "saldo_litros", "entrada_anterior_l"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return df
+
+
+@st.cache_data(ttl=120, show_spinner=False)
 def load_frota(_c):
     for table in ("dim_frota", "frota", "cadastro_frota", "equipamentos", "vw_frota"):
         try:
@@ -888,6 +899,7 @@ df_lub = load_lub(conn)
 df_fin_lub = load_fin_lub(conn)
 df_abast = load_abast(conn)
 df_transf = load_transf(conn)
+df_saldo_comboio = load_saldo_comboio(conn)
 df_disp = load_disp(conn)
 df_horas = load_horas_frota(conn, mes_atual_str)
 df_frota = load_frota(conn)
@@ -1199,17 +1211,26 @@ with tab3:
         df_transf[df_transf["destino"].str.upper().str.contains("COMBOIO", na=False)]
         if not df_transf.empty else pd.DataFrame()
     )
-    trec = tcb["quantidade_l"].sum() if not tcb.empty else 0
-    tdist = df_abast["liters"].sum() if not df_abast.empty else 0
-    saldo = max(0, trec - tdist)
+    if not df_saldo_comboio.empty:
+        sc = df_saldo_comboio.iloc[0]
+        trec = float(sc.get("total_entrada_l", 0) or 0)
+        tdist = float(sc.get("total_saida_l", 0) or 0)
+        saldo = max(0.0, float(sc.get("saldo_litros", trec - tdist) or 0))
+        ent_ant = float(sc.get("entrada_anterior_l", 0) or 0)
+        ciclo_txt = f"{fmt(ent_ant)} + {fmt(trec - ent_ant)} L (2 últ. transf.)"
+    else:
+        trec = tcb["quantidade_l"].sum() if not tcb.empty else 0
+        tdist = df_abast["liters"].sum() if not df_abast.empty else 0
+        saldo = max(0, trec - tdist)
+        ciclo_txt = "ciclo indisponível"
     pct = min(100, (saldo / CAP) * 100) if CAP > 0 else 0
     cor_s = "#c0392b" if pct <= 20 else "#d4a017" if pct <= 40 else "#4a9e3f"
     ah = df_abast[df_abast["data_os"] == hoje] if not df_abast.empty else pd.DataFrame()
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("🛢 Saldo Comboio", f"{fmt(saldo)} L", f"{pct:.1f}% de {fmt(CAP)} L")
-    k2.metric("📥 Total Recebido", f"{fmt(trec)} L")
-    k3.metric("📤 Total Distribuído", f"{fmt(tdist)} L")
+    k2.metric("📥 Entrada ciclo", f"{fmt(trec)} L", ciclo_txt)
+    k3.metric("📤 Saídas no ciclo", f"{fmt(tdist)} L")
     k4.metric("⛽ Litros Hoje", f"{fmt(ah['liters'].sum())} L" if not ah.empty else "0 L",
               f"{len(ah)} eventos")
 
@@ -1221,7 +1242,7 @@ with tab3:
             "text": (
                 f"<span style='color:#e8edd0'>Saldo estimado: <b>{fmt(saldo)} L</b></span><br>"
                 f"<span style='color:#8aab80;font-size:12px'>"
-                f"Recebido do posto: {fmt(trec)} L · Distribuído às máquinas: {fmt(tdist)} L</span>"
+                f"Ciclo 2 transf.: {fmt(trec)} L · Saídas no ciclo: {fmt(tdist)} L</span>"
             ),
             "font": {"color": "#e8edd0", "size": 14},
         },
@@ -1259,12 +1280,12 @@ with tab3:
             dark_table(da, height=350)
 
     with cc2:
-        st.markdown('<div class="sec">Últimas 3 transferências posto → comboio</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec">Últimas 2 transferências do ciclo (posto → comboio)</div>', unsafe_allow_html=True)
         if tcb.empty:
             st.info("Nenhuma transferência registrada.")
         else:
             cols_t = [c for c in ["data", "combustivel", "origem", "quantidade_l", "observacao"] if c in tcb.columns]
-            dt2 = tcb.sort_values("data", ascending=False).head(3)[cols_t].copy()
+            dt2 = tcb.sort_values("data", ascending=False).head(2)[cols_t].copy()
             dt2["data"] = pd.to_datetime(dt2["data"]).dt.strftime("%d/%m/%Y")
             dt2["quantidade_l"] = dt2["quantidade_l"].apply(lambda v: f"{fmt(v)} L")
             dt2.columns = [c.replace("_", " ").title() for c in cols_t]
