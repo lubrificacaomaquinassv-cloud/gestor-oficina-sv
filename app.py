@@ -3,11 +3,14 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
+from sigcf_auth import exigir_acesso
+
+# Conferir no site apos publicar: deve aparecer este codigo no canto superior direito
+PAINEL_BUILD = "2026-08-03-padronizacao-007"
+
 st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
 
-from sigcf_auth import logo_html
-
-PAINEL_BUILD = "2026-06-13-camada2h"
+exigir_acesso("Gestor da Oficina — Santa Vergínia")
 
 st.markdown("""
 <style>
@@ -22,9 +25,6 @@ h1,h2,h3,p,span,label{color:#e8edd0;}
 .sec{font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:700;
      letter-spacing:2px;text-transform:uppercase;color:#8aab80;
      border-left:4px solid #4a9e3f;padding-left:10px;margin:18px 0 10px;}
-.logo-frame{background:linear-gradient(145deg,#0a1628,#0d2040);border:2px solid #c9a227;
- border-radius:12px;padding:5px;display:inline-block;box-shadow:0 4px 18px rgba(0,0,0,.45);}
-.logo-frame img{display:block;border-radius:8px;}
 .stTabs [data-baseweb="tab-list"]{background:#111c10;border-bottom:2px solid #1e2e1c;gap:0;}
 .stTabs [data-baseweb="tab"]{color:#4a6644;font-family:'Barlow Condensed',sans-serif;
      font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
@@ -257,6 +257,24 @@ def excluir_disponibilidade(categoria, id_frota=""):
 
 
 
+def pick_col(df, *names, default=None):
+    """Retorna a primeira coluna existente (compatibilidade pós-migração 007)."""
+    if df is None or getattr(df, "empty", True):
+        return default
+    for n in names:
+        if n in df.columns:
+            return n
+    return default
+
+
+def order_col_candidates(order_col):
+    if not order_col:
+        return []
+    if order_col in ("criado_em", "created_at"):
+        return ["created_at", "criado_em"]
+    return [order_col]
+
+
 from st_supabase_connection import SupabaseConnection
 conn = st.connection("supabase", type=SupabaseConnection, ttl=300)
 
@@ -267,12 +285,18 @@ def sb(table, order_col=None, desc=True):
     page_size = 1000
     offset = 0
     while True:
-        try:
-            q = conn.client.table(table).select("*")
-            if order_col:
-                q = q.order(order_col, desc=desc)
-            r = q.range(offset, offset + page_size - 1).execute()
-        except Exception:
+        executed = False
+        for oc in order_col_candidates(order_col) or [None]:
+            try:
+                q = conn.client.table(table).select("*")
+                if oc:
+                    q = q.order(oc, desc=desc)
+                r = q.range(offset, offset + page_size - 1).execute()
+                executed = True
+                break
+            except Exception:
+                continue
+        if not executed:
             try:
                 r = (
                     conn.client.table(table)
@@ -335,7 +359,9 @@ def agregar_custo_mes(df, n=6, mes_ref=None):
     if df.empty:
         return pd.DataFrame(columns=["mes_key", "mes_label", "custo_total"])
     tmp = df.copy()
-    if "criado_em" in tmp.columns:
+    if "created_at" in tmp.columns:
+        tmp["mes_key"] = parse_mes_key(parse_dt(tmp["created_at"]))
+    elif "criado_em" in tmp.columns:
         tmp["mes_key"] = parse_mes_key(parse_dt(tmp["criado_em"]))
     elif "mes_key" in tmp.columns:
         tmp["mes_key"] = parse_mes_key(tmp["mes_key"])
@@ -435,7 +461,11 @@ def load_os(_c):
     df["mes_os"] = df["dt"].dt.to_period("M")
     df["dt_fmt"] = df["dt"].dt.strftime("%d/%m/%Y %H:%M")
     df["os_num"] = os_numero(df["numero_os"])
-    df["tempo_min"] = pd.to_numeric(df["tempo_min"], errors="coerce").fillna(0)
+    col_tempo = pick_col(df, "tempo_minutos", "tempo_min")
+    if col_tempo:
+        df["tempo_min"] = pd.to_numeric(df[col_tempo], errors="coerce").fillna(0)
+    else:
+        df["tempo_min"] = 0
     return df.sort_values(["os_num", "dt"], ascending=False)
 
 
@@ -444,7 +474,9 @@ def load_bor(_c):
     df = sb("os_borracharia")
     if df.empty:
         return df
-    df["dt"] = parse_dt(df["criado_em"])
+    col_dt = pick_col(df, "created_at", "criado_em")
+    if col_dt:
+        df["dt"] = parse_dt(df[col_dt])
     df["data_os"] = df["dt"].dt.date
     df["dt_fmt"] = df["dt"].dt.strftime("%d/%m/%Y %H:%M")
     return df
@@ -608,12 +640,13 @@ def load_lub_painel(_c):
         return df
     df = df.copy()
     df["vehicle"] = df["id_frota"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-    for col in ("h_atual", "h_proxima_troca", "horas_restantes"):
+    for col in ("h_atual", "h_proxima_troca", "horas_restantes", "h_na_troca"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     if "status_troca" in df.columns:
         df.loc[df["status_troca"] == "SEM_HORIMETRO", "status_troca"] = pd.NA
-    df["h_na_troca"] = pd.NA
+    if "h_na_troca" not in df.columns:
+        df["h_na_troca"] = pd.NA
     df["_fonte"] = "vw_painel_lub_status"
     if "fonte_horimetro" in df.columns:
         df["_fonte_horimetro"] = df["fonte_horimetro"].fillna("—")
@@ -699,20 +732,21 @@ def load_lub(_c):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_fin_lub(_c):
-    df = sb("vw_painel_lub_fin", order_col="criado_em", desc=True)
+    df = sb("vw_painel_lub_fin", order_col="created_at", desc=True)
     fonte = "vw_painel_lub_fin"
     if df.empty:
-        df = sb("financeiro_lubrificacao", order_col="criado_em", desc=True)
+        df = sb("financeiro_lubrificacao", order_col="created_at", desc=True)
         fonte = "financeiro_lubrificacao"
     if df.empty:
         return df
     df = df.copy()
     df["_fonte"] = fonte
     df["custo_total"] = pd.to_numeric(df["custo_total"], errors="coerce").fillna(0)
-    if "criado_em" in df.columns:
-        df["mes_key"] = parse_mes_key(parse_dt(df["criado_em"]))
-    elif "mes_key" in df.columns:
+    col_mes = pick_col(df, "created_at", "criado_em", "mes_key")
+    if col_mes == "mes_key":
         df["mes_key"] = parse_mes_key(df["mes_key"])
+    elif col_mes:
+        df["mes_key"] = parse_mes_key(parse_dt(df[col_mes]))
     return df
 
 
@@ -964,7 +998,7 @@ def colunas_custo(df):
 def load_financeiro(_c):
     """Carrega financeiro_os (repo sigcf-financeiro / financeiro_app.py)."""
     try:
-        df = sb("financeiro_os", order_col="criado_em", desc=True)
+        df = sb("financeiro_os", order_col="created_at", desc=True)
         if df.empty:
             df = sb("financeiro_os")
     except Exception:
@@ -990,7 +1024,7 @@ def load_financeiro(_c):
     df["custo_mo"] = pd.to_numeric(
         df["custo_mo"] if "custo_mo" in df.columns else 0, errors="coerce"
     ).fillna(0)
-    dt_col = "criado_em" if "criado_em" in df.columns else "created_at"
+    dt_col = pick_col(df, "created_at", "criado_em") or "created_at"
     if dt_col in df.columns:
         df["mes_key"] = parse_mes_key(parse_dt(df[dt_col]))
     mod_col = "tipo_os" if "tipo_os" in df.columns else None
@@ -1037,9 +1071,9 @@ def resumo_financeiro_os(df_fin):
 
 
 # ── HEADER ────────────────────────────────────────────────────
-h1, h2, h3 = st.columns([1.1, 8, 2])
+h1, h2, h3 = st.columns([1, 8, 2])
 with h1:
-    st.markdown(logo_html(118), unsafe_allow_html=True)
+    st.image("https://raw.githubusercontent.com/lubrificacaomaquinassv-cloud/painel-frota-sv/main/icons/logo_sv.png", width=92)
 with h2:
     st.markdown(
         '<div style="font-family:Barlow Condensed,sans-serif;">'
@@ -1245,6 +1279,11 @@ with tab2:
         st.info("Sem dados de lubrificação (vw_painel_lub_status).")
     else:
         fonte = df_lub["_fonte"].iloc[0] if "_fonte" in df_lub.columns else "—"
+        fonte_h = (
+            df_lub["_fonte_horimetro"].iloc[0]
+            if "_fonte_horimetro" in df_lub.columns
+            else "apontamento_campo (após SQL 006)"
+        )
         col_frota = (
             "vehicle" if "vehicle" in df_lub.columns
             else "id_frota" if "id_frota" in df_lub.columns
@@ -1265,7 +1304,7 @@ with tab2:
         prx = int((df_lub_u["status_troca"] == "PROXIMO").sum())
         atr = int((df_lub_u["status_troca"] == "EM ATRASO").sum())
         st.caption(
-            f"Fonte horímetros: {fonte} · {len(df_mon)} motorizados com horímetro · "
+            f"Fonte: {fonte} · Horímetro atual: {fonte_h} · {len(df_mon)} motorizados com horímetro · "
             f"{len(df_lub_e)} cadastrados no total"
         )
         if not df_excl.empty:
@@ -1360,9 +1399,13 @@ with tab2:
         def badge(s):
             return {"OK": "🟢 OK", "PROXIMO": "🟡 PRÓXIMO", "EM ATRASO": "🔴 EM ATRASO"}.get(s, f"⚪ {s}")
 
-        cols_show = [col_frota, "h_na_troca", "h_proxima_troca", "h_atual", "horas_restantes", "status_troca"]
+        cols_show = [col_frota, "data_ultima_troca", "h_na_troca", "h_proxima_troca", "h_atual", "data_apontamento", "horas_restantes", "status_troca"]
         cols_show = [c for c in cols_show if c in df_lub_u.columns]
         dt = df_lub_u.head(20)[cols_show].copy()
+        if "data_ultima_troca" in dt.columns:
+            dt["data_ultima_troca"] = parse_dt(dt["data_ultima_troca"]).dt.strftime("%d/%m/%Y").fillna("—")
+        if "data_apontamento" in dt.columns:
+            dt["data_apontamento"] = parse_dt(dt["data_apontamento"]).dt.strftime("%d/%m/%Y").fillna("—")
         dt["h_na_troca"] = dt["h_na_troca"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
         dt["h_proxima_troca"] = dt["h_proxima_troca"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
         dt["h_atual"] = dt["h_atual"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
@@ -1370,8 +1413,14 @@ with tab2:
             lambda v: f"{v:+.0f}h" if pd.notna(v) else "—")
         dt["status_troca"] = dt["status_troca"].apply(badge)
         dt = dt.rename(columns={
-            col_frota: "Frota", "h_na_troca": "H. Troca", "h_proxima_troca": "Próxima (h)",
-            "h_atual": "H. Atual", "horas_restantes": "Restante", "status_troca": "Status",
+            col_frota: "Frota",
+            "data_ultima_troca": "Última troca",
+            "h_na_troca": "H. Troca",
+            "h_proxima_troca": "Próxima (h)",
+            "h_atual": "H. Atual",
+            "data_apontamento": "Apont. dia",
+            "horas_restantes": "Restante",
+            "status_troca": "Status",
         })
         dark_table(dt, height=380)
 
@@ -1490,7 +1539,7 @@ with tab2:
             "lubrificacao_v2 (litros campo) nao entra aqui — use AUDITAR_LUBRIFICACAO_V2.sql."
         )
         cols_fin = [c for c in ["id_frota", "insumo_nome", "quantidade", "valor_unitario",
-                                "custo_total", "order_number", "localizacao"]
+                                "custo_total", "numero_os", "order_number", "localizacao"]
                     if c in fin_m.columns]
         dfin = fin_m.sort_values("custo_total", ascending=False)[cols_fin].copy()
         if "quantidade" in dfin.columns:
@@ -1501,7 +1550,8 @@ with tab2:
             dfin["custo_total"] = dfin["custo_total"].apply(fmtR)
         dfin = dfin.rename(columns={
             "id_frota": "Frota", "insumo_nome": "Insumo", "quantidade": "Qtd",
-            "valor_unitario": "R$/un", "custo_total": "Total", "order_number": "Ordem",
+            "valor_unitario": "R$/un", "custo_total": "Total",
+            "numero_os": "Ordem", "order_number": "Ordem",
             "localizacao": "Local",
         })
         dark_table(dfin, height=320)
