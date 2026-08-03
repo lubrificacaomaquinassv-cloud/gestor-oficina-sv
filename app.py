@@ -3,14 +3,10 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-from sigcf_auth import exigir_acesso
-
-# Conferir no site apos publicar: deve aparecer este codigo no canto superior direito
 PAINEL_BUILD = "2026-08-03-padronizacao-007"
+INTERVALO_LUB_PADRAO = 300.0
 
 st.set_page_config(page_title="Gestor Oficina — Santa Vergínia", layout="wide", page_icon="🔧")
-
-exigir_acesso("Gestor da Oficina — Santa Vergínia")
 
 st.markdown("""
 <style>
@@ -115,7 +111,7 @@ def label_trator(row):
     return str(frota)
 
 
-def filtrar_tratores(df, df_frota=None, df_painel=None):
+def filtrar_tratores(df, df_frota=None):
     """Disponibilidade de frota: somente tratores (exclui implementos)."""
     if df.empty:
         return df
@@ -132,22 +128,15 @@ def filtrar_tratores(df, df_frota=None, df_painel=None):
         frota_col = "id_frota" if "id_frota" in df_frota.columns else "frota"
         if frota_col not in df_frota.columns:
             frota_col = df_frota.columns[0]
-        cat_map = mapa_categoria_frota(df_frota, df_painel)
-        out["_cat"] = out["id_frota"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True).map(
-            lambda f: norm_categoria((cat_map.get(f) or {}).get("categoria", ""))
-        )
-        out["_mod"] = out["id_frota"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True).map(
-            lambda f: str((cat_map.get(f) or {}).get("modelo", "")).upper()
-        )
-        out = out[
-            ~out.apply(
-                lambda r: eh_implemento(r["_cat"], r["_mod"])
-                or eh_terceiro(r["_cat"], r["_mod"], r["id_frota"])
-                or excluir_disponibilidade(r["_cat"], r["id_frota"]),
-                axis=1,
-            )
-        ]
-        return out.drop(columns=["_cat", "_mod"], errors="ignore")
+        tipo_cols = [c for c in df_frota.columns if c.lower() in (
+            "tipo", "categoria", "tipo_equipamento", "grupo", "classe", "familia")]
+        if tipo_cols:
+            tc = tipo_cols[0]
+            fmap = df_frota.set_index(frota_col)[tc].astype(str).str.upper()
+            out["_tipo_frota"] = out["id_frota"].astype(str).map(fmap).fillna("")
+            out = out[~out["_tipo_frota"].str.contains(
+                "IMPLEMENTO|REBOQUE|CARRETA|PLATAFORMA|SEM APONT", na=False, regex=True)]
+            return out.drop(columns=["_tipo_frota"], errors="ignore")
 
     for col in ["tipo", "categoria", "tipo_equipamento", "grupo", "classe", "familia"]:
         if col in out.columns:
@@ -161,104 +150,12 @@ def filtrar_tratores(df, df_frota=None, df_painel=None):
 
     return out
 
-def mapa_categoria_frota(df_frota, df_painel=None):
-    """id_frota -> {categoria, modelo}. dim_frota_painel sobrescreve dim_frota."""
-    out = {}
-    if df_frota is not None and not df_frota.empty:
-        col = "id_frota" if "id_frota" in df_frota.columns else "frota"
-        if col not in df_frota.columns:
-            col = df_frota.columns[0]
-        cat = next((c for c in df_frota.columns if c.lower() in (
-            "categoria", "tipo", "tipo_equipamento", "grupo", "classe", "familia")), None)
-        cols = [col]
-        if cat:
-            cols.append(cat)
-        if "modelo" in df_frota.columns:
-            cols.append("modelo")
-        tmp = df_frota[cols].copy()
-        tmp[col] = tmp[col].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-        for _, row in tmp.iterrows():
-            fid = str(row[col]).strip()
-            meta = {"categoria": "", "modelo": ""}
-            if cat:
-                meta["categoria"] = str(row.get(cat) or "").strip().upper()
-            if "modelo" in row.index:
-                meta["modelo"] = str(row.get("modelo") or "").strip().upper()
-            out[fid] = meta
-    if df_painel is not None and not df_painel.empty:
-        for _, row in df_painel.iterrows():
-            fid = str(row.get("id_frota", "")).strip()
-            if not fid:
-                continue
-            out[fid] = {
-                "categoria": str(row.get("categoria_painel") or row.get("categoria") or "").strip().upper(),
-                "modelo": str(row.get("modelo") or "").strip().upper(),
-            }
-    return out
 
-
-def norm_categoria(c):
-    return str(c or "").upper().strip().replace("Á", "A").replace("Ã", "A")
-
-
-# Taxonomia dim_frota.categoria (padrao SV)
-_CAT_IMPLEMENTO = frozenset({"IMPLEMENTO", "REBOQUE", "CARRETA", "PLATAFORMA"})
-_CAT_MOTOR = frozenset({
-    "EQUIPAMENTO", "TRATOR", "MAQUINA", "CAMINHAO", "MOTO",
-    "COLHEIT", "COLHEITADEIRA", "VEICULO_PESADO", "VEICULO_LEVE",
-})
-_FROTA_TERCEIRO = frozenset({"9999", "920K", "920"})
-
-
-def eh_terceiro(categoria="", modelo="", id_frota=""):
-    """Frota alugada/terceirizada — fora do painel da frota propria."""
-    fid = str(id_frota or "").strip().upper()
-    if fid in _FROTA_TERCEIRO:
-        return True
-    c = norm_categoria(categoria)
-    if c == "TERCEIRO":
-        return True
-    m = str(modelo or "").upper().strip()
-    return m in ("TERCEIRO", "TERCEIROS")
-
-
-def eh_implemento(categoria, modelo=""):
-    """Implemento acoplado: sem operador proprio (operador esta no trator)."""
-    c = norm_categoria(categoria)
-    m = str(modelo or "").upper().strip()
-    if c in _CAT_MOTOR:
-        return False
-    if c in _CAT_IMPLEMENTO:
-        return True
-    # Legado: categoria vazia/antiga — inferir pelo modelo (match exato de palavra, nao substring)
-    _motor_m = (
-        "TRATOR", "COLHEIT", "CAMINH", "MAQUINA", "GERADOR", "MOTO", "XRE", "CRF",
-        "AGRALE", "PULVER", "PLANTIO", "GRUA", "ESCAV", "T7", "T6", "PATROL",
-    )
-    if any(x in m for x in _motor_m):
-        return False
-    _impl_m = (
-        "GRADE", "SULCAD", "CALCARE", "PLAINA", "ROLO", "ESCAR",
-        "IMPLEMENTO", "REBOQUE", "CARRETA", "PLATAFORMA",
-    )
-    if any(x in m for x in _impl_m):
-        return True
-    return False
-
-
-def excluir_disponibilidade(categoria, id_frota=""):
-    """Parado x Operando: fora implemento, moto, caminhao e terceiros."""
-    if eh_terceiro(categoria, id_frota=id_frota):
-        return True
-    c = norm_categoria(categoria)
-    if eh_implemento(c, ""):
-        return True
-    return c in ("MOTO", "CAMINHAO", "VEICULO_LEVE", "VEICULO_PESADO", "TERCEIRO")
-
+from st_supabase_connection import SupabaseConnection
+conn = st.connection("supabase", type=SupabaseConnection, ttl=300)
 
 
 def pick_col(df, *names, default=None):
-    """Retorna a primeira coluna existente (compatibilidade pós-migração 007)."""
     if df is None or getattr(df, "empty", True):
         return default
     for n in names:
@@ -267,26 +164,17 @@ def pick_col(df, *names, default=None):
     return default
 
 
-def order_col_candidates(order_col):
-    if not order_col:
-        return []
-    if order_col in ("criado_em", "created_at"):
-        return ["created_at", "criado_em"]
-    return [order_col]
-
-
-from st_supabase_connection import SupabaseConnection
-conn = st.connection("supabase", type=SupabaseConnection, ttl=300)
-
-
 def sb(table, order_col=None, desc=True):
     """Busca todos os registros (Supabase limita ~1000 por página)."""
     all_data = []
     page_size = 1000
     offset = 0
+    order_try = [order_col] if order_col else [None]
+    if order_col in ("criado_em", "created_at"):
+        order_try = ["created_at", "criado_em"]
     while True:
         executed = False
-        for oc in order_col_candidates(order_col) or [None]:
+        for oc in order_try:
             try:
                 q = conn.client.table(table).select("*")
                 if oc:
@@ -346,41 +234,6 @@ def parse_mes_key(series):
     return out
 
 
-def fmt_mes_label(mes_key):
-    """2026-06 -> Jun/2026 (eixo legivel, sem confundir com dias)."""
-    try:
-        return pd.Period(str(mes_key), freq="M").strftime("%b/%Y")
-    except Exception:
-        return str(mes_key)
-
-
-def agregar_custo_mes(df, n=6, mes_ref=None):
-    """Soma custo_total por mes (YYYY-MM). Ultimos n meses; meses vazios = zero."""
-    if df.empty:
-        return pd.DataFrame(columns=["mes_key", "mes_label", "custo_total"])
-    tmp = df.copy()
-    if "created_at" in tmp.columns:
-        tmp["mes_key"] = parse_mes_key(parse_dt(tmp["created_at"]))
-    elif "criado_em" in tmp.columns:
-        tmp["mes_key"] = parse_mes_key(parse_dt(tmp["criado_em"]))
-    elif "mes_key" in tmp.columns:
-        tmp["mes_key"] = parse_mes_key(tmp["mes_key"])
-    else:
-        return pd.DataFrame(columns=["mes_key", "mes_label", "custo_total"])
-    tmp["custo_total"] = pd.to_numeric(tmp["custo_total"], errors="coerce").fillna(0)
-    tmp = tmp[tmp["mes_key"].notna() & (tmp["mes_key"].astype(str).str.len() >= 7)]
-    g = tmp.groupby("mes_key", as_index=False)["custo_total"].sum()
-    if mes_ref:
-        fim = pd.Period(str(mes_ref), freq="M")
-        chaves = [str(fim - i) for i in range(n - 1, -1, -1)]
-        g = g.set_index("mes_key").reindex(chaves, fill_value=0).reset_index()
-        g.columns = ["mes_key", "custo_total"]
-    else:
-        g = g.sort_values("mes_key").tail(n)
-    g["mes_label"] = g["mes_key"].map(fmt_mes_label)
-    return g
-
-
 def meses_disponiveis(series, mes_atual_str, n=6):
     """Meses com dados + mês atual e anterior sempre visíveis."""
     meses = sorted({str(m) for m in series.dropna().unique() if str(m) not in ("", "NaT", "None")}, reverse=True)
@@ -413,8 +266,21 @@ def load_horas_frota(_c, mes_atual_str):
         return df
     if "frota" in df.columns and "id_frota" not in df.columns:
         df["id_frota"] = df["frota"]
+    # A view traz vários meses — sem filtro duplica tratores nos gráficos.
+    if "mes" in df.columns:
+        df["mes_key"] = parse_mes_key(df["mes"])
+        df = df[df["mes_key"] == mes_atual_str].copy()
+    if df.empty:
+        return df
+    df_frota_ref = load_frota(_c)
+    if not df_frota_ref.empty and "id_frota" in df.columns:
+        fc = "id_frota" if "id_frota" in df_frota_ref.columns else "frota"
+        if fc in df_frota_ref.columns and "modelo" in df_frota_ref.columns:
+            fmap = df_frota_ref.set_index(fc)["modelo"]
+            df["modelo"] = df["id_frota"].astype(str).map(fmap)
     if "modelo" not in df.columns and "frota" in df.columns:
         df["modelo"] = df["frota"]
+    df = df.drop_duplicates(subset=["id_frota"], keep="first")
     df["mes_key"] = mes_atual_str
     df["mes"] = pd.to_datetime(mes_atual_str + "-01", errors="coerce")
     if "dias_com_apontamento" not in df.columns:
@@ -445,27 +311,16 @@ def melhor_data_os(df):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_os(_c):
-    df = sb("vw_painel_os", order_col="created_at", desc=True)
-    if df.empty:
-        df = sb("ordem_servico", order_col="created_at", desc=True)
+    df = sb("ordem_servico", order_col="created_at", desc=True)
     if df.empty:
         return df
-    df = df.copy()
-    if "tipo_manutencao" not in df.columns:
-        extra = sb("ordem_servico", order_col="created_at", desc=True)
-        if not extra.empty and "tipo_manutencao" in extra.columns and "numero_os" in extra.columns:
-            ex = extra[["numero_os", "tipo_manutencao"]].drop_duplicates(subset=["numero_os"], keep="first")
-            df = df.merge(ex, on="numero_os", how="left")
     df["dt"] = melhor_data_os(df)
     df["data_os"] = df["dt"].dt.date
     df["mes_os"] = df["dt"].dt.to_period("M")
     df["dt_fmt"] = df["dt"].dt.strftime("%d/%m/%Y %H:%M")
     df["os_num"] = os_numero(df["numero_os"])
     col_tempo = pick_col(df, "tempo_minutos", "tempo_min")
-    if col_tempo:
-        df["tempo_min"] = pd.to_numeric(df[col_tempo], errors="coerce").fillna(0)
-    else:
-        df["tempo_min"] = 0
+    df["tempo_min"] = pd.to_numeric(df[col_tempo], errors="coerce").fillna(0) if col_tempo else 0
     return df.sort_values(["os_num", "dt"], ascending=False)
 
 
@@ -492,165 +347,109 @@ def status_lub(hr):
     return "OK"
 
 
-def horimetro_placeholder(h_atual, h_proxima):
-    """Leitura 1/1 (ou igual e baixa) usada so para fechar OS — nao e horimetro real."""
+def norm_frota_id(s):
+    return s.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+
+
+def proxima_lub_invalida(h_prox, h_na_troca=None):
     try:
-        a = float(h_atual)
-        p = float(h_proxima)
+        p = float(h_prox)
     except (TypeError, ValueError):
-        return False
-    return a <= 10 and p == a
+        return True
+    if p <= 10:
+        return True
+    if h_na_troca is not None and pd.notna(h_na_troca):
+        try:
+            if p <= float(h_na_troca):
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
 
 
-def _aplicar_flags_horimetro(df, df_painel=None):
-    """Placeholder OS + monitora_horimetro=false + frota fora do cadastro painel."""
-    if "horimetro_placeholder" in df.columns:
-        df["_placeholder"] = df["horimetro_placeholder"].fillna(False).astype(bool)
-    else:
-        df["_placeholder"] = df.apply(
-            lambda r: horimetro_placeholder(r.get("h_atual"), r.get("h_proxima_troca")),
-            axis=1,
-        )
-    if df_painel is not None and not df_painel.empty:
-        ids_painel = set(df_painel["id_frota"].astype(str).str.strip())
-        df["_fora_cadastro"] = ~df["_fid"].isin(ids_painel)
-        if "monitora_horimetro" in df_painel.columns:
-            mon_map = (
-                df_painel.assign(id_frota=df_painel["id_frota"].astype(str).str.strip())
-                .set_index("id_frota")["monitora_horimetro"]
-            )
-            df["_horimetro_quebrado"] = df["_fid"].map(
-                lambda f: f in ids_painel and not bool(mon_map.get(str(f).strip(), True))
-            )
-        else:
-            df["_horimetro_quebrado"] = False
-    else:
-        df["_fora_cadastro"] = False
-        df["_horimetro_quebrado"] = False
-    df["_sem_horimetro"] = (
-        df["_sem_horimetro"]
-        | df["_placeholder"]
-        | df["_horimetro_quebrado"]
-        | df["_fora_cadastro"]
-    )
-    return df
+def mapa_h_final_campo(df_apont):
+    if df_apont is None or df_apont.empty:
+        return {}
+    tmp = df_apont.copy()
+    tmp["frota"] = norm_frota_id(tmp["frota"])
+    tmp["h_final"] = pd.to_numeric(tmp.get("h_final"), errors="coerce")
+    tmp = tmp.dropna(subset=["h_final"])
+    tmp = tmp[tmp["h_final"] > 0].sort_values("data")
+    if tmp.empty:
+        return {}
+    return tmp.groupby("frota", as_index=False)["h_final"].last().set_index("frota")["h_final"].to_dict()
 
 
-def filtrar_fin_lub_painel(df, df_painel):
-    """Custos lub: so frotas cadastradas no painel e elegiveis (motorizadas)."""
-    if df.empty or df_painel is None or df_painel.empty or "id_frota" not in df.columns:
-        return df, 0
-    painel = df_painel.copy()
-    painel["id_frota"] = painel["id_frota"].astype(str).str.strip()
-    elegiveis = painel[
-        painel["monitora_horimetro"].fillna(True).astype(bool)
-        & ~painel["categoria_painel"].isin(["IMPLEMENTO", "TERCEIRO"])
-    ]["id_frota"]
-    ids_ok = set(elegiveis.astype(str))
-    df = df.copy()
-    df["_fid"] = df["id_frota"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-    mask = df["_fid"].isin(ids_ok) & (pd.to_numeric(df["custo_total"], errors="coerce").fillna(0) > 0)
-    n_excl = int((~mask).sum())
-    return df.loc[mask].drop(columns=["_fid"], errors="ignore"), n_excl
+def intervalo_lub_horas(h_na, h_prox, intervalo_cadastro):
+    if pd.notna(intervalo_cadastro):
+        try:
+            iv = float(intervalo_cadastro)
+            if iv > 0:
+                return iv
+        except (TypeError, ValueError):
+            pass
+    if not proxima_lub_invalida(h_prox, h_na):
+        try:
+            d = float(h_prox) - float(h_na)
+            if d > 0:
+                return d
+        except (TypeError, ValueError):
+            pass
+    return INTERVALO_LUB_PADRAO
 
 
-def enriquecer_lub(df_lub, df_frota, df_painel=None):
-    """Marca implementos e linhas sem horímetro válido (não entram nos gráficos)."""
-    if df_lub.empty:
+def corrigir_lub_com_apontamento(df_lub, df_apont, df_ult=None, df_equip=None):
+    """H. Atual = apontamento_campo.h_final; próxima corrigida se placeholder na lub."""
+    if df_lub is None or df_lub.empty:
         return df_lub
     df = df_lub.copy()
     col_frota = "vehicle" if "vehicle" in df.columns else ("id_frota" if "id_frota" in df.columns else "frota")
-    df["_fid"] = (
-        df[col_frota].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-    )
+    df["_fid"] = norm_frota_id(df[col_frota])
 
-    for col in ("h_atual", "h_proxima_troca", "horas_restantes"):
+    for col in ("h_atual", "h_proxima_troca", "h_na_troca", "intervalo_horas", "hourmeter_atual", "hourmeter_prox"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df["_sem_horimetro"] = df["h_atual"].isna() | df["h_proxima_troca"].isna() | df["horas_restantes"].isna()
-
-    if "monitoravel" in df.columns:
-        if "eh_terceiro" in df.columns:
-            df["_terceiro"] = df["eh_terceiro"].fillna(False).astype(bool)
-        else:
-            cat_map = mapa_categoria_frota(df_frota, df_painel)
-            df["_terceiro"] = df["_fid"].map(
-                lambda fid: eh_terceiro(
-                    (cat_map.get(str(fid).strip(), {}) or {}).get("categoria", ""),
-                    (cat_map.get(str(fid).strip(), {}) or {}).get("modelo", ""),
-                    fid,
-                )
-            )
-        if "categoria_painel" in df.columns:
-            df["_implemento"] = df.apply(
-                lambda r: not r["_terceiro"] and eh_implemento(
-                    r.get("categoria_painel", ""), r.get("modelo", "")
-                ),
-                axis=1,
-            )
-        else:
-            df["_implemento"] = False
-        df = _aplicar_flags_horimetro(df, df_painel)
-        df["_monitoravel"] = (
-            df["monitoravel"].fillna(False).astype(bool)
-            & ~df["_placeholder"]
-            & ~df["_horimetro_quebrado"]
-            & ~df["_fora_cadastro"]
-        )
-        return df
-
-    cat_map = mapa_categoria_frota(df_frota, df_painel)
-
-    def eh_impl_frota(fid):
-        meta = cat_map.get(str(fid).strip(), {})
-        if eh_implemento(meta.get("categoria", ""), meta.get("modelo", "")):
-            return True
-        return False
-
-    df["_implemento"] = df["_fid"].map(eh_impl_frota)
-    df["_terceiro"] = df["_fid"].map(
-        lambda fid: eh_terceiro(
-            (cat_map.get(str(fid).strip(), {}) or {}).get("categoria", ""),
-            (cat_map.get(str(fid).strip(), {}) or {}).get("modelo", ""),
-            fid,
-        )
-    )
-    if "modelo" in df.columns:
-        m = df["modelo"].astype(str).str.upper()
-        df["_implemento"] = df["_implemento"] | m.str.contains(
-            r"GRADE|SULCAD|CALCARE|PLAINA|ROLO|\bIMP\b|REBOQUE|CARRETA|PLATAFORMA",
-            na=False, regex=True)
-
-    for col in ("h_atual", "h_proxima_troca", "horas_restantes"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df["_sem_horimetro"] = df["h_atual"].isna() | df["h_proxima_troca"].isna() | df["horas_restantes"].isna()
-    df = _aplicar_flags_horimetro(df, df_painel)
-    df["_monitoravel"] = ~df["_implemento"] & ~df["_terceiro"] & ~df["_sem_horimetro"]
-    return df
-
-
-@st.cache_data(ttl=120, show_spinner=False)
-def load_lub_painel(_c):
-    """Camada painel: vw_painel_lub_status (classificacao + monitoravel no SQL)."""
-    df = sb("vw_painel_lub_status", order_col="data_ref", desc=True)
-    if df.empty:
-        return df
-    df = df.copy()
-    df["vehicle"] = df["id_frota"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-    for col in ("h_atual", "h_proxima_troca", "horas_restantes", "h_na_troca"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    if "status_troca" in df.columns:
-        df.loc[df["status_troca"] == "SEM_HORIMETRO", "status_troca"] = pd.NA
     if "h_na_troca" not in df.columns:
         df["h_na_troca"] = pd.NA
-    df["_fonte"] = "vw_painel_lub_status"
-    if "fonte_horimetro" in df.columns:
-        df["_fonte_horimetro"] = df["fonte_horimetro"].fillna("—")
-    return df
+
+    if df_ult is not None and not df_ult.empty:
+        ult = df_ult.copy()
+        ult["frota"] = norm_frota_id(ult["frota"])
+        ult_map = pd.to_numeric(ult.set_index("frota")["horimetro_ultima_troca"], errors="coerce")
+        miss = df["h_na_troca"].isna()
+        df.loc[miss, "h_na_troca"] = df.loc[miss, "_fid"].map(ult_map)
+
+    if df_equip is not None and not df_equip.empty and "intervalo_horas" not in df.columns:
+        eq = df_equip.copy()
+        eq["frota"] = norm_frota_id(eq["frota"])
+        iv_map = pd.to_numeric(eq.set_index("frota")["intervalo_horas"], errors="coerce")
+        df["intervalo_horas"] = df["_fid"].map(iv_map)
+
+    for idx, row in df.iterrows():
+        h_na = row.get("h_na_troca")
+        h_prox = row.get("h_proxima_troca")
+        if proxima_lub_invalida(h_prox, h_na) and pd.notna(h_na):
+            iv = intervalo_lub_horas(h_na, h_prox, row.get("intervalo_horas"))
+            df.at[idx, "h_proxima_troca"] = float(h_na) + iv
+
+    mapa = mapa_h_final_campo(df_apont)
+    df["_sem_apontamento"] = ~df["_fid"].isin(mapa.keys())
+    df["h_atual"] = df["_fid"].map(mapa)
+
+    df["horas_restantes"] = df["h_proxima_troca"] - df["h_atual"]
+    df["status_troca"] = df["horas_restantes"].apply(status_lub)
+    df["_monitoravel"] = (
+        df["h_atual"].notna()
+        & df["h_proxima_troca"].notna()
+        & df["horas_restantes"].notna()
+        & ~df["_sem_apontamento"]
+        & ~df.apply(
+            lambda r: proxima_lub_invalida(r.get("h_proxima_troca"), r.get("h_na_troca")),
+            axis=1,
+        )
+    )
+    df["_fonte"] = "apontamento_campo + lubrificacao_v3"
+    return df.drop(columns=["_fid"], errors="ignore")
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -724,29 +523,17 @@ def load_lub_gestor(_c):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_lub(_c):
-    df = load_lub_painel(_c)
-    if not df.empty:
-        return df
     return load_lub_gestor(_c)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_fin_lub(_c):
-    df = sb("vw_painel_lub_fin", order_col="created_at", desc=True)
-    fonte = "vw_painel_lub_fin"
-    if df.empty:
-        df = sb("financeiro_lubrificacao", order_col="created_at", desc=True)
-        fonte = "financeiro_lubrificacao"
+    df = sb("financeiro_lubrificacao", order_col="criado_em", desc=True)
     if df.empty:
         return df
-    df = df.copy()
-    df["_fonte"] = fonte
     df["custo_total"] = pd.to_numeric(df["custo_total"], errors="coerce").fillna(0)
-    col_mes = pick_col(df, "created_at", "criado_em", "mes_key")
-    if col_mes == "mes_key":
-        df["mes_key"] = parse_mes_key(df["mes_key"])
-    elif col_mes:
-        df["mes_key"] = parse_mes_key(parse_dt(df[col_mes]))
+    if "criado_em" in df.columns:
+        df["mes_key"] = parse_mes_key(parse_dt(df["criado_em"]))
     return df
 
 
@@ -767,160 +554,9 @@ def load_fin_lanc(_c):
     return df
 
 
-def sem_acento(s):
-    """Normaliza nomes para comparação: sem acento, maiúsculo, sem espaços nas pontas."""
-    import unicodedata
-    def _norm(x):
-        x = "" if x is None else str(x)
-        x = unicodedata.normalize("NFKD", x)
-        x = x.encode("ascii", "ignore").decode("ascii")
-        return x.strip().upper()
-    return s.map(_norm)
-
-def norm_frota_id(s):
-    """3369 e 3369.0 viram a mesma chave (OS x apontamento_campo)."""
-    return s.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-
-
-def operador_apontamento(frota, data_os, df_apont):
-    """Ultimo operador em apontamento_campo ate a data da OS (sem outras fontes)."""
-    if df_apont is None or df_apont.empty:
-        return ""
-    fid = norm_frota_id(pd.Series([frota])).iloc[0]
-    cand = df_apont[df_apont["frota"] == fid].sort_values("data")
-    if cand.empty:
-        return ""
-    if pd.notna(data_os):
-        ate = cand[cand["data"] <= data_os]
-        return str(ate.iloc[-1]["operador"]) if not ate.empty else ""
-    return str(cand.iloc[-1]["operador"])
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def load_apont(_c):
-    """apontamento_campo: quem operou cada frota em cada data."""
-    df = sb("apontamento_campo")
-    if df.empty:
-        return df
-    df = df.copy()
-    df["data"] = pd.to_datetime(df["data"], errors="coerce").dt.date
-    df["frota"] = norm_frota_id(df["frota"])
-    df["operador"] = sem_acento(df["operador"])
-    return df.dropna(subset=["data"]).sort_values("data")
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def load_colab(_c):
-    """dim_colaborador: custo_hora por nome (mecânicos e operadores)."""
-    df = sb("dim_colaborador")
-    if df.empty:
-        return df
-    df = df.copy()
-    df["_nome"] = sem_acento(df["nome"])
-    df["custo_hora"] = pd.to_numeric(df["custo_hora"], errors="coerce").fillna(0)
-    return df[df["custo_hora"] > 0].drop_duplicates(subset=["_nome"], keep="first")
-
-@st.cache_data(ttl=300, show_spinner=False)
-def load_operadores(_c):
-    """dim_operador_frota: vínculo frota ↔ operador (sem valor)."""
-    df = sb("dim_operador_frota")
-    if df.empty:
-        return df
-    df = df.copy()
-    if "ativo" in df.columns:
-        df = df[df["ativo"].astype(str).str.upper().isin(["TRUE", "1", "SIM", "S"])]
-    df["id_frota"] = norm_frota_id(df["id_frota"])
-    df["operador"] = sem_acento(df["operador"])
-    return df.drop_duplicates(subset=["id_frota"], keep="first")
-
-
-def mapa_busca_custo_hora(df_colab):
-    """Retorna funcao nome -> custo_hora (dim_colaborador)."""
-    if df_colab is None or df_colab.empty:
-        return lambda _n: 0.0
-    _ch = df_colab.set_index("_nome")["custo_hora"]
-    _ch_fl = {}
-    for _n, _v in _ch.items():
-        _ts = str(_n).split()
-        if len(_ts) >= 2:
-            _k = (_ts[0], _ts[-1])
-            _ch_fl[_k] = None if _k in _ch_fl else float(_v)
-
-    def busca_ch(nome):
-        nome = str(nome or "").strip()
-        if not nome:
-            return 0.0
-        if nome in _ch.index:
-            return float(_ch[nome])
-        _ts = nome.split()
-        if len(_ts) >= 2:
-            _v = _ch_fl.get((_ts[0], _ts[-1]))
-            if _v is not None:
-                return _v
-        if len(_ts) == 1:
-            _pre = _ts[0]
-            hits = [n for n in _ch.index if n == _pre or n.startswith(_pre + " ")]
-            if len(hits) == 1:
-                return float(_ch[hits[0]])
-        return 0.0
-
-    return busca_ch
-
-
-def calc_parada_os(df_os, df_colab, df_apont, df_oper, df_frota, df_painel):
-    """Tempo parada + operador + custo (mecanico + operador) por OS."""
-    if df_os.empty:
-        return df_os
-    busca_ch = mapa_busca_custo_hora(df_colab)
-    out = df_os.copy()
-    out["_h"] = pd.to_numeric(out["tempo_min"], errors="coerce").fillna(0) / 60.0
-    out["_mec"] = sem_acento(out["mecanico"]) if "mecanico" in out.columns else ""
-    out["_c_mec"] = out["_h"] * out["_mec"].map(busca_ch)
-
-    _cat_map = mapa_categoria_frota(df_frota, df_painel)
-    _frotas_apont = set()
-    if df_apont is not None and not df_apont.empty and "frota" in df_apont.columns:
-        _frotas_apont = set(df_apont["frota"].astype(str).str.strip())
-
-    def _eh_impl_frota(f):
-        f = str(f).strip()
-        if f in _frotas_apont:
-            return False
-        meta = _cat_map.get(f) or {}
-        if eh_terceiro(meta.get("categoria", ""), meta.get("modelo", ""), f):
-            return True
-        return eh_implemento(meta.get("categoria", ""), meta.get("modelo", ""))
-
-    out["_impl"] = out["id_frota"].astype(str).str.strip().str.replace(
-        r"\.0$", "", regex=True).map(_eh_impl_frota)
-
-    out["_oper"] = ""
-    if "operador" in out.columns:
-        out["_oper"] = sem_acento(out["operador"])
-        out.loc[out["_oper"].isin(["NAN", "NONE", "<NA>", "NULL", "N/A", "-"]), "_oper"] = ""
-    if df_apont is not None and not df_apont.empty and out["_oper"].eq("").any():
-        for _i in out.index[out["_oper"].eq("") & ~out["_impl"]]:
-            _op = operador_apontamento(out.at[_i, "id_frota"], out.at[_i, "data_os"], df_apont)
-            if _op:
-                out.at[_i, "_oper"] = _op
-    if df_oper is not None and not df_oper.empty:
-        _fmap = df_oper.set_index("id_frota")["operador"]
-        _falta = out["_oper"].eq("") & ~out["_impl"]
-        out.loc[_falta, "_oper"] = (
-            norm_frota_id(out.loc[_falta, "id_frota"]).map(_fmap).fillna(""))
-    out["_oper"] = sem_acento(out["_oper"])
-    out.loc[out["_impl"], "_oper"] = ""
-    out["_c_op"] = out["_h"] * out["_oper"].map(busca_ch)
-    out.loc[out["_impl"], "_c_op"] = 0.0
-    out["_c_tot"] = out["_c_mec"] + out["_c_op"]
-    return out
-
-
 @st.cache_data(ttl=120, show_spinner=False)
 def load_abast(_c):
-    df = sb("vw_painel_abastecimento", order_col="created_at", desc=True)
-    if df.empty:
-        df = sb("vw_abastecimento_consolidado", order_col="created_at", desc=True)
+    df = sb("vw_abastecimento_consolidado", order_col="created_at", desc=True)
     if df.empty:
         return df
     df["dt"] = parse_dt(df["created_at"])
@@ -932,23 +568,11 @@ def load_abast(_c):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_transf(_c):
-    df = sb("vw_painel_transferencias")
-    if df.empty:
-        df = sb("combustivel_transferencia")
+    df = sb("combustivel_transferencia")
     if df.empty:
         return df
     df["data"] = pd.to_datetime(df["data"], errors="coerce")
     df["quantidade_l"] = pd.to_numeric(df["quantidade_l"], errors="coerce").fillna(0)
-    return df
-
-
-@st.cache_data(ttl=120, show_spinner=False)
-def load_frota_painel(_c):
-    df = sb("dim_frota_painel")
-    if df.empty:
-        return df
-    df = df.copy()
-    df["id_frota"] = df["id_frota"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
     return df
 
 
@@ -962,6 +586,167 @@ def load_frota(_c):
         except Exception:
             continue
     return pd.DataFrame()
+
+
+def sem_acento(s):
+    import unicodedata
+
+    def _norm(x):
+        x = "" if x is None else str(x)
+        x = unicodedata.normalize("NFKD", x)
+        x = x.encode("ascii", "ignore").decode("ascii")
+        return x.strip().upper()
+
+    return s.map(_norm)
+
+
+def operador_apontamento(frota, data_os, df_apont):
+    if df_apont is None or df_apont.empty:
+        return ""
+    fid = norm_frota_id(pd.Series([frota])).iloc[0]
+    cand = df_apont[df_apont["frota"] == fid].sort_values("data")
+    if cand.empty:
+        return ""
+    if pd.notna(data_os):
+        ate = cand[cand["data"] <= data_os]
+        return str(ate.iloc[-1]["operador"]) if not ate.empty else ""
+    return str(cand.iloc[-1]["operador"])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_colab(_c):
+    df = sb("dim_colaborador")
+    if df.empty:
+        return df
+    df = df.copy()
+    df["_nome"] = sem_acento(df["nome"])
+    df["custo_hora"] = pd.to_numeric(df["custo_hora"], errors="coerce").fillna(0)
+    return df[df["custo_hora"] > 0].drop_duplicates(subset=["_nome"], keep="first")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_operadores(_c):
+    df = sb("dim_operador_frota")
+    if df.empty:
+        return df
+    df = df.copy()
+    if "ativo" in df.columns:
+        df = df[df["ativo"].astype(str).str.upper().isin(["TRUE", "1", "SIM", "S"])]
+    df["id_frota"] = norm_frota_id(df["id_frota"])
+    df["operador"] = sem_acento(df["operador"])
+    return df.drop_duplicates(subset=["id_frota"], keep="first")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_apont(_c):
+    df = sb("apontamento_campo")
+    if df.empty:
+        return df
+    df = df.copy()
+    df["data"] = pd.to_datetime(df["data"], errors="coerce").dt.date
+    df["frota"] = norm_frota_id(df["frota"])
+    df["operador"] = sem_acento(df["operador"])
+    return df.dropna(subset=["data"]).sort_values("data")
+
+
+def busca_custo_hora(df_colab):
+    if df_colab.empty:
+        return lambda _nome: 0.0
+    ch = df_colab.set_index("_nome")["custo_hora"]
+    ch_fl = {}
+    for nome, val in ch.items():
+        partes = str(nome).split()
+        if len(partes) >= 2:
+            ch_fl.setdefault((partes[0], partes[-1]), float(val))
+
+    def busca(nome):
+        nome = str(nome or "").strip()
+        if not nome:
+            return 0.0
+        if nome in ch.index:
+            return float(ch[nome])
+        partes = nome.split()
+        if len(partes) >= 2:
+            val = ch_fl.get((partes[0], partes[-1]))
+            if val is not None:
+                return val
+        if len(partes) == 1:
+            hits = [n for n in ch.index if n == partes[0] or n.startswith(partes[0] + " ")]
+            if len(hits) == 1:
+                return float(ch[hits[0]])
+        return 0.0
+
+    return busca
+
+
+def eh_implemento_os(id_frota, df_frota):
+    if df_frota is None or df_frota.empty:
+        return False
+    col = "id_frota" if "id_frota" in df_frota.columns else "frota"
+    cat_col = next(
+        (c for c in df_frota.columns if c.lower() in ("categoria", "tipo", "tipo_equipamento")),
+        None,
+    )
+    fid = str(id_frota).strip()
+    row = df_frota[df_frota[col].astype(str).str.strip().str.replace(r"\.0$", "", regex=True) == fid]
+    if row.empty:
+        return False
+    cat = str(row.iloc[0].get(cat_col, "") if cat_col else "").upper()
+    mod = str(row.iloc[0].get("modelo", "")).upper()
+    if any(x in cat for x in ("IMPLEMENTO", "REBOQUE", "CARRETA", "PLATAFORMA")):
+        return True
+    return any(x in mod for x in ("GRADE", "SULCAD", "REBOQUE", "CARRETA", "PLATAFORMA", "IMPLEMENTO"))
+
+
+def calcular_custos_os(df_os_mes, df_colab, df_oper, df_apont, df_frota):
+    """MO mecânico + operador parado: tempo da OS × custo_hora (dim_colaborador)."""
+    if df_os_mes.empty:
+        return pd.DataFrame()
+    busca = busca_custo_hora(df_colab)
+    out = df_os_mes.copy()
+    out["_h"] = pd.to_numeric(out["tempo_min"], errors="coerce").fillna(0) / 60.0
+    out["custo_mec"] = out["_h"] * sem_acento(out["mecanico"]).map(busca)
+
+    out["_oper"] = ""
+    if "operador" in out.columns:
+        out["_oper"] = sem_acento(out["operador"])
+        out.loc[out["_oper"].isin(["NAN", "NONE", "<NA>", "NULL", "N/A", "-", ""]), "_oper"] = ""
+    if not df_apont.empty:
+        for idx in out.index[out["_oper"].eq("")]:
+            op = operador_apontamento(out.at[idx, "id_frota"], out.at[idx, "data_os"], df_apont)
+            if op:
+                out.at[idx, "_oper"] = op
+    if not df_oper.empty:
+        fmap = df_oper.set_index("id_frota")["operador"]
+        falta = out["_oper"].eq("")
+        out.loc[falta, "_oper"] = norm_frota_id(out.loc[falta, "id_frota"]).map(fmap).fillna("")
+        out["_oper"] = sem_acento(out["_oper"])
+
+    out["_impl"] = out["id_frota"].astype(str).str.strip().map(lambda f: eh_implemento_os(f, df_frota))
+    out.loc[out["_impl"], "_oper"] = ""
+    out["custo_op"] = out["_h"] * out["_oper"].map(busca)
+    out.loc[out["_impl"], "custo_op"] = 0.0
+    out["custo_parada"] = out["custo_mec"] + out["custo_op"]
+    return out[["numero_os", "custo_mec", "custo_op", "custo_parada"]]
+
+
+def contagem_os_frota(df_os, mes_label):
+    if df_os.empty:
+        return {}
+    mes = pd.Period(mes_label, freq="M")
+    sub = df_os[df_os["mes_os"] == mes].copy()
+    sub["_f"] = norm_frota_id(sub["id_frota"])
+    return sub.groupby("_f")["numero_os"].nunique().to_dict()
+
+
+def dias_apont_frota(df_apont, mes_label):
+    if df_apont.empty:
+        return {}
+    mes = pd.Period(mes_label, freq="M")
+    sub = df_apont.copy()
+    sub["mes"] = pd.to_datetime(sub["data"]).dt.to_period("M")
+    sub = sub[sub["mes"] == mes]
+    return sub.groupby("frota")["data"].nunique().to_dict()
 
 
 def fmt(n, dec=0):
@@ -998,7 +783,7 @@ def colunas_custo(df):
 def load_financeiro(_c):
     """Carrega financeiro_os (repo sigcf-financeiro / financeiro_app.py)."""
     try:
-        df = sb("financeiro_os", order_col="created_at", desc=True)
+        df = sb("financeiro_os", order_col="criado_em", desc=True)
         if df.empty:
             df = sb("financeiro_os")
     except Exception:
@@ -1024,7 +809,7 @@ def load_financeiro(_c):
     df["custo_mo"] = pd.to_numeric(
         df["custo_mo"] if "custo_mo" in df.columns else 0, errors="coerce"
     ).fillna(0)
-    dt_col = pick_col(df, "created_at", "criado_em") or "created_at"
+    dt_col = "criado_em" if "criado_em" in df.columns else "created_at"
     if dt_col in df.columns:
         df["mes_key"] = parse_mes_key(parse_dt(df[dt_col]))
     mod_col = "tipo_os" if "tipo_os" in df.columns else None
@@ -1080,7 +865,7 @@ with h2:
         '<div style="font-size:22px;font-weight:700;color:#e8edd0;letter-spacing:1px;">'
         'GESTOR DA OFICINA — SANTA VERGÍNIA</div>'
         '<div style="font-size:11px;color:#8aab80;letter-spacing:2px;margin-top:2px;">'
-        'OS · Lubrificação · Borracharia · Comboio · Disponibilidade · Camada Painel</div></div>',
+        'OS · Lubrificação · Borracharia · Comboio · Disponibilidade</div></div>',
         unsafe_allow_html=True,
     )
 with h3:
@@ -1106,12 +891,12 @@ df_transf = load_transf(conn)
 df_disp = load_disp(conn)
 df_horas = load_horas_frota(conn, mes_atual_str)
 df_frota = load_frota(conn)
-df_painel = load_frota_painel(conn)
 df_fin = load_financeiro(conn)
 df_fin_lanc = load_fin_lanc(conn)
 df_colab = load_colab(conn)
 df_oper = load_operadores(conn)
 df_apont = load_apont(conn)
+df_lub = corrigir_lub_com_apontamento(df_lub, df_apont)
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔧 Ordens de Serviço",
@@ -1184,7 +969,33 @@ with tab1:
 
         st.caption(f"{len(df_mes_sel)} OS em {mes_sel_label}")
 
+        custos_os = pd.DataFrame()
+        res_fin = pd.DataFrame()
         if not df_mes_sel.empty:
+            fin_mes = financeiro_do_mes(df_fin, df_mes_sel, mes_sel_label)
+            res_fin = resumo_financeiro_os(fin_mes)
+            custos_os = calcular_custos_os(df_mes_sel, df_colab, df_oper, df_apont, df_frota)
+
+            if not custos_os.empty:
+                st.markdown(
+                    f'<div class="sec">Custos da parada — {mes_sel_label} · dim_colaborador</div>',
+                    unsafe_allow_html=True,
+                )
+                pecas_mes = res_fin["pecas"].sum() if not res_fin.empty else 0
+                kc1, kc2, kc3, kc4, kc5 = st.columns(5)
+                kc1.metric("🔧 MO Mecânico", fmtR(custos_os["custo_mec"].sum()))
+                kc2.metric("👨‍🌾 MO Operador", fmtR(custos_os["custo_op"].sum()))
+                kc3.metric("💸 Total Parada", fmtR(custos_os["custo_parada"].sum()))
+                kc4.metric("🔩 Peças (NF)", fmtR(pecas_mes))
+                kc5.metric("💰 Total Geral", fmtR(custos_os["custo_parada"].sum() + pecas_mes))
+                st.caption(
+                    "Parada = tempo da OS × custo_hora (dim_colaborador). "
+                    "Operador: OS → apontamento_campo → dim_operador_frota. "
+                    "Implementos acoplados: MO operador N/A."
+                )
+            elif df_colab.empty:
+                st.info("Cadastre custo_hora em dim_colaborador para calcular MO mecânico e operador parado.")
+
             col_r1, col_r2 = st.columns(2)
             with col_r1:
                 st.markdown(
@@ -1247,314 +1058,120 @@ with tab1:
                 f'<div class="sec">Lista de OS — {mes_sel_label}</div>',
                 unsafe_allow_html=True,
             )
-            cols_t = ["numero_os", "id_frota", "sistema", "tipo_manutencao", "status", "mecanico", "dt_fmt"]
-            df_t = df_mes_sel[cols_t].copy()
-            dfp = calc_parada_os(df_mes_sel, df_colab, df_apont, df_oper, df_frota, df_painel)
-            df_t["parada"] = dfp["_h"].apply(
-                lambda v: f"{v * 60:.0f} min ({v:.1f}h)" if v > 0 else "—")
-            df_t["operador"] = dfp.apply(
-                lambda r: "N/A — implemento" if r.get("_impl") else (
-                    r["_oper"] if r.get("_oper") else "—"),
-                axis=1,
-            )
-            names = ["OS", "Frota", "Sistema", "Tipo", "Status", "Mecânico", "Data/Hora", "Parada", "Operador"]
-            if not df_colab.empty:
-                df_t["custo_parada"] = dfp["_c_tot"].apply(lambda v: fmtR(v) if v > 0 else "—")
-                names.append("Custo parada")
-            df_t.columns = names
-            st.caption(
-                "Parada e operador vêm da OS/apontamento. "
-                "Custo parada = tempo × custo_hora (detalhe na aba Financeiro). "
-                "Peças/NF-e ficam em Financeiro → Lançamentos."
-            )
+            cols_t = [c for c in [
+                "numero_os", "id_frota", "sistema", "tipo_manutencao", "status", "mecanico", "dt_fmt",
+            ] if c in df_mes_sel.columns]
+            df_t = df_mes_sel.drop_duplicates(subset=["numero_os"], keep="first")[cols_t].copy()
+            if not custos_os.empty:
+                df_t = df_t.merge(custos_os, on="numero_os", how="left")
+                if not res_fin.empty:
+                    pecas_os = res_fin[["numero_os", "pecas"]].drop_duplicates(subset=["numero_os"], keep="first")
+                    df_t = df_t.merge(pecas_os, on="numero_os", how="left")
+                else:
+                    df_t["pecas"] = 0.0
+                for col in ("pecas", "custo_mec", "custo_op", "custo_parada"):
+                    df_t[col] = pd.to_numeric(df_t.get(col, 0), errors="coerce").fillna(0)
+                df_t["total"] = df_t["pecas"] + df_t["custo_parada"]
+                df_t = df_t[[*cols_t, "pecas", "custo_mec", "custo_op", "total"]]
+                df_t["pecas"] = df_t["pecas"].apply(fmtR)
+                df_t["custo_mec"] = df_t["custo_mec"].apply(fmtR)
+                df_t["custo_op"] = df_t["custo_op"].apply(fmtR)
+                df_t["total"] = df_t["total"].apply(fmtR)
+            rename = {
+                "numero_os": "OS",
+                "id_frota": "Frota",
+                "sistema": "Sistema",
+                "tipo_manutencao": "Tipo",
+                "status": "Status",
+                "mecanico": "Mecânico",
+                "dt_fmt": "Data/Hora",
+                "pecas": "Peças",
+                "custo_mec": "R$ Mecânico",
+                "custo_op": "R$ Operador",
+                "total": "Total",
+            }
+            df_t.columns = [rename.get(c, c) for c in df_t.columns]
             dark_table(df_t, height=420)
 
 # ══════════════════════════════════════════════════════════════
 # TAB 2 — LUBRIFICAÇÃO + BORRACHARIA
 # ══════════════════════════════════════════════════════════════
 with tab2:
-    st.markdown('<div class="sec">Lubrificação — painel analítico</div>', unsafe_allow_html=True)
-
+    st.markdown('<div class="sec">Lubrificação — horímetros de troca de óleo</div>', unsafe_allow_html=True)
     if df_lub.empty:
-        st.info("Sem dados de lubrificação (vw_painel_lub_status).")
+        st.info("Sem dados de lubrificação.")
     else:
         fonte = df_lub["_fonte"].iloc[0] if "_fonte" in df_lub.columns else "—"
-        fonte_h = (
-            df_lub["_fonte_horimetro"].iloc[0]
-            if "_fonte_horimetro" in df_lub.columns
-            else "apontamento_campo (após SQL 006)"
-        )
-        col_frota = (
-            "vehicle" if "vehicle" in df_lub.columns
-            else "id_frota" if "id_frota" in df_lub.columns
-            else "frota"
-        )
-        df_lub_e = enriquecer_lub(df_lub, df_frota, df_painel)
-        df_mon = df_lub_e[df_lub_e["_monitoravel"]].copy()
-        df_excl = df_lub_e[~df_lub_e["_monitoravel"]].copy()
-
-        n_impl = int(df_excl["_implemento"].sum())
-        n_sem_h = int((~df_excl["_implemento"] & df_excl["_sem_horimetro"]).sum())
-        n_ph = int(df_excl.get("_placeholder", pd.Series(False, index=df_excl.index)).sum())
-        n_quebr = int(df_excl.get("_horimetro_quebrado", pd.Series(False, index=df_excl.index)).sum())
-        n_fora = int(df_excl.get("_fora_cadastro", pd.Series(False, index=df_excl.index)).sum())
-        df_lub_u = df_mon.sort_values("horas_restantes", ascending=True)
-
-        ok = int((df_lub_u["status_troca"] == "OK").sum())
-        prx = int((df_lub_u["status_troca"] == "PROXIMO").sum())
-        atr = int((df_lub_u["status_troca"] == "EM ATRASO").sum())
+        df_mon = df_lub[df_lub.get("_monitoravel", False)].copy()
+        n_fora = len(df_lub) - len(df_mon)
         st.caption(
-            f"Fonte: {fonte} · Horímetro atual: {fonte_h} · {len(df_mon)} motorizados com horímetro · "
-            f"{len(df_lub_e)} cadastrados no total"
+            f"Fonte: {fonte} · H. Atual = último h_final do Apontamento Campo · "
+            f"{len(df_mon)} equipamentos monitorados"
         )
-        if not df_excl.empty:
+        if n_fora:
             st.caption(
-                f"Fora dos gráficos: {n_impl} implemento(s) · {n_quebr} horímetro quebrado · "
-                f"{n_ph} placeholder OS · {n_fora} fora do cadastro painel · {n_sem_h} sem horímetro."
+                f"{n_fora} frota(s) fora da lista: sem apontamento de campo ou cadastro de próxima troca inválido."
             )
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("✅ OK", ok)
-        m2.metric("⚠️ Próximo ≤100h", prx)
-        m3.metric("🔴 Em atraso", atr)
-        m4.metric("📋 Monitorados", len(df_mon))
+        if df_mon.empty:
+            st.warning("Nenhum equipamento com apontamento de campo e próxima troca válida.")
+        else:
+            ok = (df_mon["status_troca"] == "OK").sum()
+            prx = (df_mon["status_troca"] == "PROXIMO").sum()
+            atr = (df_mon["status_troca"] == "EM ATRASO").sum()
+            l1, l2, l3, l4 = st.columns(4)
+            l1.metric("✅ OK", ok)
+            l2.metric("⚠️ Próximo ≤100h", prx)
+            l3.metric("🔴 Em Atraso", atr)
+            l4.metric("📋 Monitorados", len(df_mon))
 
-        g1, g2 = st.columns([1, 2])
-        with g1:
-            fig_st = go.Figure(go.Pie(
-                labels=["OK", "Próximo", "Em atraso"],
-                values=[ok, prx, atr],
-                hole=0.55,
-                marker=dict(colors=["#4a9e3f", "#d4a017", "#c0392b"]),
-                textinfo="label+value",
-                textfont=dict(color="#e8edd0", size=11),
-            ))
-            fig_st.update_layout(
-                **PDARK, height=280,
-                title=dict(text="Status — só motorizados", font=dict(size=13, color="#8aab80")),
-                showlegend=False,
+        if not df_fin_lub.empty and "mes_key" in df_fin_lub.columns:
+            fin_mes_lub = df_fin_lub[df_fin_lub["mes_key"] == mes_atual_str]
+            if not fin_mes_lub.empty:
+                st.markdown(
+                    f'<div class="sec">Custos lubrificação — {mes_atual_str} · financeiro_lubrificacao</div>',
+                    unsafe_allow_html=True,
+                )
+                fc1, fc2, fc3 = st.columns(3)
+                fc1.metric("💰 Total mês", fmtR(fin_mes_lub["custo_total"].sum()))
+                fc2.metric("📋 Lançamentos", len(fin_mes_lub))
+                fc3.metric("🛢 Frotas", fin_mes_lub["id_frota"].nunique())
+                st.caption("Atualize preços em preco_insumo / dim_insumo para custos automáticos no app novo.")
+
+        if not df_mon.empty:
+            st.markdown(
+                '<div class="sec">Equipamentos — ordem de urgência (top 15)</div>',
+                unsafe_allow_html=True,
             )
-            st.plotly_chart(fig_st, use_container_width=True, key="k_lub_status")
-
-        with g2:
-            top_u = df_lub_u[
-                df_lub_u["status_troca"].isin(["EM ATRASO", "PROXIMO"])
-                & df_lub_u["horas_restantes"].notna()
-            ].head(12)
-            if top_u.empty:
-                st.info("Nenhum motorizado em atraso ou próximo da troca.")
-            else:
-                cores = top_u["status_troca"].map({
-                    "OK": "#4a9e3f", "PROXIMO": "#d4a017", "EM ATRASO": "#c0392b",
-                }).fillna("#666")
-                fig_u = go.Figure(go.Bar(
-                    y=top_u[col_frota].astype(str),
-                    x=top_u["horas_restantes"],
-                    orientation="h",
-                    marker_color=cores,
-                    text=top_u["horas_restantes"].apply(lambda v: f"{v:+.0f}h"),
-                    textposition="outside",
-                    textfont=dict(color="#e8edd0", size=11),
-                ))
-                fig_u.update_layout(
-                    **PDARK, height=280,
-                    title=dict(
-                        text="Urgência — horas restantes (próxima − atual)",
-                        font=dict(size=13, color="#8aab80"),
-                    ),
-                    xaxis={**PLOT_AXIS, "title": "Horas restantes", "zeroline": True},
-                    yaxis={**PLOT_AXIS, "autorange": "reversed"},
-                )
-                fig_u.add_vline(x=0, line_dash="dash", line_color="#888", line_width=1)
-                fig_u.add_vline(x=100, line_dash="dot", line_color="#d4a017", line_width=1)
-                st.plotly_chart(fig_u, use_container_width=True, key="k_lub_urg")
-                st.caption(
-                    "Negativo = passou da troca · 0 a 100h = alerta · implementos não entram neste gráfico."
-                )
-
-        if not df_excl.empty:
-            with st.expander(f"Cadastros fora do painel de horímetro ({len(df_excl)})"):
-                dx = df_excl[[col_frota]].copy()
-                dx["Motivo"] = df_excl.apply(
-                    lambda r: "Implemento (sem horímetro de troca)"
-                    if r["_implemento"]
-                    else "Horímetro quebrado (cadastro painel)"
-                    if r.get("_horimetro_quebrado")
-                    else "Leitura placeholder (1/1 na OS)"
-                    if r.get("_placeholder")
-                    else "Frota fora do cadastro painel"
-                    if r.get("_fora_cadastro")
-                    else "Frota de terceiros"
-                    if r.get("_terceiro")
-                    else "Sem horímetro válido",
-                    axis=1,
-                )
-                if "modelo" in df_excl.columns:
-                    dx["Modelo"] = df_excl["modelo"].fillna("—")
-                dx = dx.rename(columns={col_frota: "Frota"})
-                dark_table(dx, height=180)
-
-        st.markdown('<div class="sec">Detalhe horímetros — motorizados</div>', unsafe_allow_html=True)
-
-        def badge(s):
-            return {"OK": "🟢 OK", "PROXIMO": "🟡 PRÓXIMO", "EM ATRASO": "🔴 EM ATRASO"}.get(s, f"⚪ {s}")
-
-        cols_show = [col_frota, "data_ultima_troca", "h_na_troca", "h_proxima_troca", "h_atual", "data_apontamento", "horas_restantes", "status_troca"]
-        cols_show = [c for c in cols_show if c in df_lub_u.columns]
-        dt = df_lub_u.head(20)[cols_show].copy()
-        if "data_ultima_troca" in dt.columns:
-            dt["data_ultima_troca"] = parse_dt(dt["data_ultima_troca"]).dt.strftime("%d/%m/%Y").fillna("—")
-        if "data_apontamento" in dt.columns:
-            dt["data_apontamento"] = parse_dt(dt["data_apontamento"]).dt.strftime("%d/%m/%Y").fillna("—")
-        dt["h_na_troca"] = dt["h_na_troca"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
-        dt["h_proxima_troca"] = dt["h_proxima_troca"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
-        dt["h_atual"] = dt["h_atual"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
-        dt["horas_restantes"] = dt["horas_restantes"].apply(
-            lambda v: f"{v:+.0f}h" if pd.notna(v) else "—")
-        dt["status_troca"] = dt["status_troca"].apply(badge)
-        dt = dt.rename(columns={
-            col_frota: "Frota",
-            "data_ultima_troca": "Última troca",
-            "h_na_troca": "H. Troca",
-            "h_proxima_troca": "Próxima (h)",
-            "h_atual": "H. Atual",
-            "data_apontamento": "Apont. dia",
-            "horas_restantes": "Restante",
-            "status_troca": "Status",
-        })
-        dark_table(dt, height=380)
-
-    st.divider()
-    st.markdown('<div class="sec">Custos lubrificação — vw_painel_lub_fin</div>', unsafe_allow_html=True)
-
-    if df_fin_lub.empty or "mes_key" not in df_fin_lub.columns:
-        st.info("Sem lançamentos em vw_painel_lub_fin.")
-    else:
-        meses_lub = meses_disponiveis(df_fin_lub["mes_key"], mes_atual_str, n=8)
-        idx_lub = meses_lub.index(mes_atual_str) if mes_atual_str in meses_lub else 0
-        mes_lub_sel = st.selectbox(
-            "Mês dos custos:",
-            options=meses_lub,
-            index=idx_lub,
-            key="sel_mes_lub",
-        )
-        fin_m_raw = df_fin_lub[df_fin_lub["mes_key"] == mes_lub_sel].copy()
-        fin_m, n_fin_excl = filtrar_fin_lub_painel(fin_m_raw, df_painel)
-        fin_fonte = df_fin_lub["_fonte"].iloc[0] if "_fonte" in df_fin_lub.columns else "vw_painel_lub_fin"
-        if fin_m.empty:
-            st.info(
-                "Nenhum custo elegivel neste mes "
-                "(implementos, terceiros e horimetro quebrado ficam fora do painel)."
+            st.caption(
+                "🟢 OK · 🟡 Próximo · 🔴 Em atraso — H. Atual do Apontamento Campo · "
+                "os mais urgentes aparecem primeiro"
             )
-        fin_m["custo_total"] = pd.to_numeric(fin_m["custo_total"], errors="coerce").fillna(0)
-        fin_m["quantidade"] = pd.to_numeric(fin_m.get("quantidade", 0), errors="coerce").fillna(0)
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("💰 Total", fmtR(fin_m["custo_total"].sum()))
-        c2.metric("📋 Itens", len(fin_m))
-        c3.metric("🚜 Frotas", fin_m["id_frota"].nunique() if "id_frota" in fin_m.columns else 0)
-        c4.metric("🛢 Litros (aprox.)", fmt(fin_m["quantidade"].sum(), 1))
+            def badge(s):
+                return {"OK": "🟢 OK", "PROXIMO": "🟡 PRÓXIMO", "EM ATRASO": "🔴 EM ATRASO"}.get(s, f"⚪ {s}")
 
-        evo = agregar_custo_mes(df_fin_lub, n=6, mes_ref=mes_lub_sel)
-        cg1, cg2, cg3 = st.columns([1, 1, 1])
-        with cg1:
-            if not evo.empty:
-                cores_evo = ["#4a9e3f" if v > 0 else "#2a3a28" for v in evo["custo_total"]]
-                fig_evo = go.Figure(go.Bar(
-                    x=evo["mes_label"],
-                    y=evo["custo_total"],
-                    marker_color=cores_evo,
-                    text=evo["custo_total"].apply(lambda v: fmtR(v) if v > 0 else ""),
-                    textposition="outside",
-                    textfont=dict(color="#e8edd0", size=10),
-                ))
-                fig_evo.update_layout(
-                    **PDARK, height=260,
-                    title=dict(text="Evolução mensal (R$)", font=dict(size=12, color="#8aab80")),
-                    xaxis={**PLOT_AXIS, "type": "category", "title": "Mês"},
-                    yaxis={**PLOT_AXIS, "title": "Total"},
-                )
-                st.plotly_chart(fig_evo, use_container_width=True, key="k_lub_evo")
-                st.caption("Histórico completo do financeiro (todos os lançamentos).")
+            col_frota = "vehicle" if "vehicle" in df_mon.columns else "frota"
+            cols_show = [col_frota, "h_na_troca", "h_proxima_troca", "h_atual", "horas_restantes", "status_troca"]
+            cols_show = [c for c in cols_show if c in df_mon.columns]
 
-        with cg2:
-            if not fin_m.empty and "id_frota" in fin_m.columns:
-                fm = fin_m.copy()
-                fm["_fid"] = norm_frota_id(fm["id_frota"])
-                rf = (
-                    fm[fm["custo_total"] > 0]
-                    .groupby("_fid", as_index=False)["custo_total"].sum()
-                    .sort_values("custo_total", ascending=True)
-                    .tail(8)
-                )
-                if rf.empty:
-                    st.caption("Sem custo por frota neste mês.")
-                else:
-                    rf["frota"] = rf["_fid"].astype(str)
-                    fig_f = go.Figure(go.Bar(
-                        y=rf["frota"], x=rf["custo_total"], orientation="h",
-                        marker_color="#2980b9",
-                        text=rf["custo_total"].apply(fmtR), textposition="inside",
-                        insidetextanchor="end",
-                        textfont=dict(color="#ffffff", size=11),
-                    ))
-                    fig_f.update_layout(
-                        **PDARK,
-                        height=max(160, len(rf) * 44 + 60),
-                        title=dict(text=f"Custo por frota — {mes_lub_sel}", font=dict(size=12, color="#8aab80")),
-                        xaxis={**PLOT_AXIS, "title": "R$"},
-                        yaxis={**PLOT_AXIS, "type": "category", "categoryorder": "total ascending"},
-                    )
-                    st.plotly_chart(fig_f, use_container_width=True, key="k_lub_frota")
-
-        with cg3:
-            if not fin_m.empty and "insumo_nome" in fin_m.columns:
-                ri = (
-                    fin_m[fin_m["custo_total"] > 0]
-                    .groupby("insumo_nome")["custo_total"].sum()
-                    .reset_index().sort_values("custo_total", ascending=True).tail(8)
-                )
-                if ri.empty:
-                    st.caption("Sem insumos com custo neste mês.")
-                else:
-                    fig_i = go.Figure(go.Bar(
-                        y=ri["insumo_nome"].astype(str), x=ri["custo_total"], orientation="h",
-                        marker_color="#8e44ad",
-                        text=ri["custo_total"].apply(fmtR), textposition="inside",
-                        insidetextanchor="end",
-                        textfont=dict(color="#ffffff", size=10),
-                    ))
-                    fig_i.update_layout(
-                        **PDARK,
-                        height=max(160, len(ri) * 40 + 60),
-                        title=dict(text=f"Top insumos — {mes_lub_sel}", font=dict(size=12, color="#8aab80")),
-                        xaxis={**PLOT_AXIS, "title": "R$"},
-                        yaxis={**PLOT_AXIS, "type": "category", "categoryorder": "total ascending"},
-                    )
-                    st.plotly_chart(fig_i, use_container_width=True, key="k_lub_insumo")
-
-        st.caption(
-            f"Fonte: {fin_fonte} · exibindo só frotas motorizadas do painel "
-            f"({n_fin_excl} linha(s) do mês excluídas: implemento/terceiro/horimetro quebrado). "
-            "lubrificacao_v2 (litros campo) nao entra aqui — use AUDITAR_LUBRIFICACAO_V2.sql."
-        )
-        cols_fin = [c for c in ["id_frota", "insumo_nome", "quantidade", "valor_unitario",
-                                "custo_total", "numero_os", "order_number", "localizacao"]
-                    if c in fin_m.columns]
-        dfin = fin_m.sort_values("custo_total", ascending=False)[cols_fin].copy()
-        if "quantidade" in dfin.columns:
-            dfin["quantidade"] = dfin["quantidade"].apply(lambda v: fmt(v, 1))
-        if "valor_unitario" in dfin.columns:
-            dfin["valor_unitario"] = dfin["valor_unitario"].apply(fmtR)
-        if "custo_total" in dfin.columns:
-            dfin["custo_total"] = dfin["custo_total"].apply(fmtR)
-        dfin = dfin.rename(columns={
-            "id_frota": "Frota", "insumo_nome": "Insumo", "quantidade": "Qtd",
-            "valor_unitario": "R$/un", "custo_total": "Total",
-            "numero_os": "Ordem", "order_number": "Ordem",
-            "localizacao": "Local",
-        })
-        dark_table(dfin, height=320)
+            dt = df_mon.sort_values("horas_restantes", ascending=True).head(15)[cols_show].copy()
+            dt["h_na_troca"] = dt["h_na_troca"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
+            dt["h_proxima_troca"] = dt["h_proxima_troca"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
+            dt["h_atual"] = dt["h_atual"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
+            dt["horas_restantes"] = dt["horas_restantes"].apply(
+                lambda v: f"{v:+.0f}h" if pd.notna(v) else "—")
+            dt["status_troca"] = dt["status_troca"].apply(badge)
+            rename = {
+                col_frota: "Frota",
+                "h_na_troca": "H. Troca",
+                "h_proxima_troca": "Próxima (h)",
+                "h_atual": "H. Atual",
+                "horas_restantes": "Restante",
+                "status_troca": "Status",
+            }
+            dt = dt.rename(columns=rename)
+            dark_table(dt, height=520)
 
     st.divider()
     st.markdown('<div class="sec">Borracharia — OS recentes</div>', unsafe_allow_html=True)
@@ -1722,8 +1339,16 @@ with tab4:
             dmes_raw = pd.DataFrame()
             fonte = ""
 
-        dmes = filtrar_tratores(dmes_raw, df_frota, df_painel)
+        dmes = filtrar_tratores(dmes_raw, df_frota)
         if not dmes.empty:
+            # Views inflam total_os (ex.: frota 3393 = 140 na view, 10 OS reais em jul/26)
+            os_map = contagem_os_frota(df_os, mes_d_sel)
+            dias_map = dias_apont_frota(df_apont, mes_d_sel)
+            dmes["_fkey"] = norm_frota_id(dmes["id_frota"])
+            dmes["total_os"] = dmes["_fkey"].map(lambda f: os_map.get(f, 0))
+            if dias_map:
+                dmes["dias_com_apontamento"] = dmes["_fkey"].map(lambda f: dias_map.get(f, 0))
+            dmes = dmes.drop(columns=["_fkey"], errors="ignore")
             dmes["label"] = dmes.apply(label_trator, axis=1)
         excluidos = len(dmes_raw) - len(dmes)
 
@@ -1738,7 +1363,10 @@ with tab4:
         else:
             mlabel = mes_d_sel
             if mes_d_sel == mes_atual_str:
-                st.caption(f"Fonte: {fonte} · dados atualizados em tempo real")
+                st.caption(
+                    f"Fonte: {fonte} · OS no mês = contagem real em ordem_servico "
+                    f"(view superestima total_os)"
+                )
             dm = dmes["disponibilidade_pct"].mean()
             ht = dmes["horas_trabalhadas"].sum()
             hp = dmes["horas_parada"].sum()
@@ -1952,69 +1580,42 @@ with tab5:
                     unsafe_allow_html=True,
                 )
                 if "id_frota" in dfl.columns:
-                    dff = dfl.copy()
-                    dff["_fid"] = norm_frota_id(dff["id_frota"])
                     r = (
-                        dff.groupby("_fid", as_index=False)["valor"].sum()
-                        .sort_values("valor", ascending=False)
-                        .head(10)
+                        dfl.groupby("id_frota")["valor"].sum().reset_index()
+                        .sort_values("valor", ascending=True).tail(10)
                     )
-                    tot_frota = dfl["valor"].sum()
-                    if r.empty:
-                        st.info("Sem custo por frota neste mês.")
-                    else:
-                        t_frota = pd.DataFrame({
-                            "#": range(1, len(r) + 1),
-                            "Frota": r["_fid"].astype(str),
-                            "Valor": r["valor"].apply(fmtR),
-                            "% Mês": r["valor"].apply(
-                                lambda v: f"{v / tot_frota * 100:.1f}%" if tot_frota > 0 else "—"
-                            ),
-                        })
-                        dark_table(t_frota, height=max(220, len(t_frota) * 38 + 48))
-                        st.caption(
-                            "Valores somados de NF-e/lançamentos no mês. "
-                            "Outliers (ex.: uma OS grande) aparecem inteiros na tabela."
-                        )
+                    fig = go.Figure(go.Bar(
+                        y=r["id_frota"].astype(str), x=r["valor"], orientation="h",
+                        marker_color="#2980b9",
+                        text=r["valor"].apply(fmtR), textposition="outside",
+                        textfont=dict(color="#e8edd0", size=12),
+                        hovertemplate="Frota %{y}<br>R$ %{x:,.2f}<extra></extra>",
+                    ))
+                    fig.update_layout(
+                        **PDARK, height=280,
+                        xaxis={**PLOT_AXIS},
+                        yaxis={**PLOT_AXIS, "tickfont": dict(color="#e8edd0", size=12)},
+                    )
+                    st.plotly_chart(fig, use_container_width=True, key="k_fin_frota")
 
-            st.markdown(f'<div class="sec">Custo da parada — hora mecânico + hora operador · {mes_fin_sel}</div>', unsafe_allow_html=True)
-            df_os_fin = df_os[df_os["mes_os"].astype(str) == mes_fin_sel].copy() if not df_os.empty else pd.DataFrame()
-            if df_os_fin.empty:
-                st.info(f"Nenhuma OS em {mes_fin_sel} para calcular o custo da parada.")
-            elif df_colab.empty:
-                st.info("Cadastre o custo_hora na dim_colaborador para calcular o custo da parada.")
-            else:
-                _dfp = calc_parada_os(df_os_fin, df_colab, df_apont, df_oper, df_frota, df_painel)
-
-                p1, p2, p3, p4 = st.columns(4)
-                p1.metric("⏱ Horas Paradas", f"{fmt(_dfp['_h'].sum(), 1)}h",
-                          help="Soma do tempo (hora entrada → saída) das OS do mês")
-                p2.metric("🔧 Custo Mecânico", fmtR(_dfp["_c_mec"].sum()),
-                          help="Tempo da OS × custo_hora do mecânico (dim_colaborador)")
-                p3.metric("👨‍🌾 Custo Operador", fmtR(_dfp["_c_op"].sum()),
-                          help="Tempo da OS × custo_hora do operador parado (dim_colaborador)")
-                p4.metric("💸 Custo Total da Parada", fmtR(_dfp["_c_tot"].sum()))
-                st.caption("Cálculo: tempo da OS × custo_hora da dim_colaborador. "
-                           "Operador (só trator): 1º apontado na OS; 2º apontamento_campo até a data da OS. "
-                           "Implementos acoplados: custo operador N/A (operador no trator).")
-
-                _tp = _dfp[_dfp["_h"] > 0].sort_values("_c_tot", ascending=False).head(30)
-                if _tp.empty:
-                    st.info("As OS do mês não têm tempo de parada registrado (hora entrada/saída).")
-                else:
-                    _t = pd.DataFrame({
-                        "OS": _tp["numero_os"],
-                        "Frota": _tp["id_frota"],
-                        "Parada": _tp["_h"].apply(lambda v: f"{v * 60:.0f} min ({v:.1f}h)"),
-                        "Mecânico": _tp["mecanico"],
-                        "R$ Mecânico": _tp["_c_mec"].apply(fmtR),
-                        "Operador": _tp.apply(
-                        lambda r: "N/A — implemento" if r.get("_impl") else (
-                            r["_oper"] if r["_oper"] else "—"), axis=1),
-                        "R$ Operador": _tp["_c_op"].apply(fmtR),
-                        "Total Parada": _tp["_c_tot"].apply(fmtR),
-                    })
-                    dark_table(_t, height=420)
+            st.markdown('<div class="sec">Evolução mensal — últimos 6 meses</div>', unsafe_allow_html=True)
+            ev = (
+                df_fin_lanc.groupby("mes_key")["valor"].sum().reset_index()
+                .sort_values("mes_key").tail(6)
+            )
+            fig = go.Figure(go.Bar(
+                x=ev["mes_key"], y=ev["valor"],
+                marker_color="#d4a017",
+                text=ev["valor"].apply(fmtR), textposition="outside",
+                textfont=dict(color="#e8edd0", size=11),
+                hovertemplate="%{x}<br>R$ %{y:,.2f}<extra></extra>",
+            ))
+            fig.update_layout(
+                **PDARK, height=250,
+                xaxis={**PLOT_AXIS, "title": "Mês"},
+                yaxis={**PLOT_AXIS, "title": "R$"},
+            )
+            st.plotly_chart(fig, use_container_width=True, key="k_fin_mes")
 
             st.markdown(f'<div class="sec">Lançamentos — {mes_fin_sel}</div>', unsafe_allow_html=True)
             cols_f = [c for c in ["data_fmt", "nfe", "id_fornecedor_sap", "item",
