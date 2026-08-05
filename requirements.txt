@@ -1,5 +1,5 @@
-streamlit
-pandas
-plotly
+streamlit==1.44.1
+pandas>=2.0.0,<3.0.0
+plotly>=5.18.0
 st-supabase-connection
-supabase
+supabase>=2.0.0,<3.0.0
